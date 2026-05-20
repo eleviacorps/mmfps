@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# Large data files
+*.npy
+*.npz
+*.parquet
+*.h5
+*.hdf5
+
+# Checkpoints / model weights
+checkpoints/**/*.pt
+checkpoints/**/*.pth
+checkpoints/**/*.safetensors
+
+# Visualizations
+**/viz/
+
+# Logs
+*.log
+*.jsonl
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+data/
+main_bars_data/

@@ -1,0 +1,10 @@
+{
+  "num_samples": 500,
+  "num_paths": 128,
+  "generator_success_rate": 0.0,
+  "generator_failure_rate": 1.0,
+  "cone_coverage_rate": 0.074,
+  "mean_closest_distance": 707.2209519554973,
+  "trending_success_rate": 0.0,
+  "ranging_success_rate": 0.0
+}

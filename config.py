@@ -1,0 +1,78 @@
+"""Unified configuration for MMFPS_GEN_V2 Behavioral Diffusion Generator."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+
+@dataclass
+class BehaviorGenConfig:
+    """All hyperparameters for the MMFPS_GEN_V2 generator.
+
+    Organized into logical groups so each can be tuned independently.
+    """
+
+    # ── Feature / data dimensions ────────────────────────────────────────────
+    feature_dim: int = 1          # Feature dimension (matches MMFPS pipeline)
+    path_feature_dim: int = 1       # Single scalar per timestep (returns space)
+
+    # ── Temporal horizons (in bars) ──────────────────────────────────────────
+    short_horizon: int = 120        # Local momentum window
+    mid_horizon: int = 240          # Medium regime window
+    long_horizon: int = 480         # Macro structure window
+    path_horizon: int = 20          # Future to generate (target horizon)
+
+    # ── UNet architecture ─────────────────────────────────────────────────────
+    base_channels: int = 896        # Channel count after conv_in (~100M model)
+    num_res_blocks: int = 2         # Conv blocks per down/up stage
+    attention_window: int = 5       # Local attention window size at bottleneck
+
+    # ── Behavioral embeddings ─────────────────────────────────────────────────
+    base_behavior_dim: int = 896    # B0: global market behavior
+    agent_behavior_dim: int = 448    # zi: per-path latent dimension
+    gru_layers: int = 3             # GRU layers per horizon encoder
+
+    # ── Diffusion ─────────────────────────────────────────────────────────────
+    diffusion_timesteps: int = 400          # Training noise schedule length
+    sampling_steps: int = 50                 # DDIM reverse steps (can be < timesteps)
+    noise_scale: float = 0.05                # Stddev of initial sampling noise
+    sampling_eta: float = 0.0                # DDIM eta (0=DDIM, 1=DDPM)
+
+    # ── Generation ────────────────────────────────────────────────────────────
+    num_paths: int = 128            # Futures to generate per sample
+    training_paths_per_sample: int = 16   # Paths per sample during training (memory)
+    sampling_noise_scale: float = 1.0      # Scale factor on DDIM sampling noise
+
+    # ── Loss weights ───────────────────────────────────────────────────────────
+    weight_mse: float = 1.0
+    weight_volatility: float = 0.5
+    weight_trend: float = 0.1
+    weight_turning: float = 0.05
+    weight_dtw: float = 0.1
+    weight_diversity: float = 0.01         # Pairwise path repulsion
+    weight_latent_sensitivity: float = 0.05
+    weight_manifold_spread: float = 0.02  # Anti-collapse via endpoint spread
+
+    # ── Training ───────────────────────────────────────────────────────────────
+    batch_size: int = 16
+    accumulation_steps: int = 1      # Gradient accumulation (effective_bs = bs×acc)
+    learning_rate: float = 5e-5
+    weight_decay: float = 0.01
+    warmup_steps: int = 2000
+    max_grad_norm: float = 1.0
+    ema_decay: float = 0.9999
+
+    # ── Checkpoints / logging ──────────────────────────────────────────────────
+    checkpoint_every: int = 1000
+    log_every: int = 10
+    visualize_every: int = 500
+    max_samples: int = 6_000_000      # Cap on loaded samples (0 = unlimited)
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+    train_split: float = 0.8
+    val_split: float = 0.1
+    test_split: float = 0.1           # train+val+test should sum to 1.0
+
+
+# ── Global default instance ───────────────────────────────────────────────────
+DEFAULT_CONFIG = BehaviorGenConfig()
