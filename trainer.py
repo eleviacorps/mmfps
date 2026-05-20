@@ -154,6 +154,7 @@ def train(
     config: BehaviorGenConfig | None = None,
     resume_from: Optional[str] = None,
     device: Optional[str] = None,
+    ema_enabled: bool = True,
 ) -> BehaviorDiffusionGenerator:
     """Run full training pipeline.
 
@@ -287,7 +288,9 @@ def train(
                 x0_pred_flat = (
                     noisy - torch.sqrt(1.0 - alpha_t) * noise_pred
                 ) / torch.sqrt(alpha_t + 1e-4)
-                x0_pred_flat = torch.clamp(x0_pred_flat, -5.0, 5.0)
+                x0_pred_flat = torch.nan_to_num(
+                    x0_pred_flat, nan=0.0, posinf=5.0, neginf=-5.0,
+                )
                 x0_pred = x0_pred_flat.reshape(B, K, T)
 
             losses = compute_all_losses(
@@ -341,7 +344,8 @@ def train(
             scaler.update()
             optimizer.zero_grad()
             scheduler.step()
-            ema.update()
+            if ema_enabled:
+                ema.update()
             accumulation_counter = 0
 
         # ── Tracking ────────────────────────────────────────
@@ -351,7 +355,7 @@ def train(
             manifold_m = MetricsTracker.compute_manifold_metrics(x0_pred, B_agent)
             structural_m = MetricsTracker.compute_structural_metrics(x0_pred, target)
 
-            # Diagnostic metrics
+            # ── Diffusion diagnostics ────────────────────────────────
             step_metrics["diag/x0_mean"] = float(x0_pred.mean().item())
             step_metrics["diag/x0_std"] = float(x0_pred.std().item())
             step_metrics["diag/x0_min"] = float(x0_pred.min().item())
@@ -364,6 +368,30 @@ def train(
             step_metrics["diag/pct_finite"] = float(
                 is_stable(x0_pred)
             )
+
+            # Timestep-wise noise prediction MSE (per-sample)
+            noise_mse_per = (noise_pred - noise_true).pow(2).mean(dim=(1, 2))
+            step_metrics["diag/noise_mse_mean"] = float(noise_mse_per.mean().item())
+            step_metrics["diag/noise_mse_std"] = float(noise_mse_per.std().item())
+
+            # x0 variance over time
+            step_metrics["diag/x0_variance"] = float(x0_pred.var().item())
+
+            # Signal / noise ratio at sampled timesteps
+            alpha_t_diag = model.scheduler.alphas_cumprod.to(device_t)[t]
+            snr_val = (alpha_t_diag / (1.0 - alpha_t_diag + 1e-8)).mean().item()
+            step_metrics["diag/snr"] = float(snr_val)
+
+            # Per-timestep bin analysis (0-4: early→late noise levels)
+            t_int = t.to(torch.int32)
+            t_bin_size = max(1, cfg.diffusion_timesteps // 5)
+            for bin_i in range(5):
+                lo = bin_i * t_bin_size
+                hi = (bin_i + 1) * t_bin_size
+                bin_mask = (t_int >= lo) & (t_int < hi)
+                if bin_mask.any():
+                    mse = (noise_pred[bin_mask] - noise_true[bin_mask]).pow(2).mean().item()
+                    step_metrics[f"diag/noise_mse_t{bin_i}"] = float(mse)
 
         step_metrics["train/grad_norm"] = float(grad_norm) if accumulation_counter == 0 else 0.0
         step_metrics["train/lr"] = scheduler.get_last_lr()[0]
@@ -407,7 +435,8 @@ def train(
             _viz_callback(model, val_ds, output_dir / "viz", global_step, device_t)
 
     # ── Final save ──────────────────────────────────────────────────
-    ema.apply()
+    if ema_enabled:
+        ema.apply()
     flush_log()
     final_path = _save_checkpoint(
         model, optimizer, scheduler, ema,

@@ -13,7 +13,7 @@ class BehaviorGenConfig:
     """
 
     # ── Feature / data dimensions ────────────────────────────────────────────
-    feature_dim: int = 1          # Feature dimension (matches MMFPS pipeline)
+    feature_dim: int = 8          # Feature dimension (derived features from price)
     path_feature_dim: int = 1       # Single scalar per timestep (returns space)
 
     # ── Temporal horizons (in bars) ──────────────────────────────────────────
@@ -23,25 +23,25 @@ class BehaviorGenConfig:
     path_horizon: int = 20          # Future to generate (target horizon)
 
     # ── UNet architecture ─────────────────────────────────────────────────────
-    base_channels: int = 896        # Channel count after conv_in (~100M model)
+    base_channels: int = 256        # Channel count after conv_in (~8M model)
     num_res_blocks: int = 2         # Conv blocks per down/up stage
     attention_window: int = 5       # Local attention window size at bottleneck
 
     # ── Behavioral embeddings ─────────────────────────────────────────────────
-    base_behavior_dim: int = 896    # B0: global market behavior
-    agent_behavior_dim: int = 448    # zi: per-path latent dimension
-    gru_layers: int = 3             # GRU layers per horizon encoder
+    base_behavior_dim: int = 256    # B0: global market behavior
+    agent_behavior_dim: int = 128    # zi: per-path latent dimension
+    gru_layers: int = 2             # GRU layers per horizon encoder
 
     # ── Diffusion ─────────────────────────────────────────────────────────────
-    diffusion_timesteps: int = 400          # Training noise schedule length
-    sampling_steps: int = 50                 # DDIM reverse steps (can be < timesteps)
-    noise_scale: float = 0.05                # Stddev of initial sampling noise
-    sampling_eta: float = 0.0                # DDIM eta (0=DDIM, 1=DDPM)
+    diffusion_timesteps: int = 100          # Training noise schedule length
+    sampling_steps: int = 20                # DDIM reverse steps (can be < timesteps)
+    noise_scale: float = 0.01               # Stddev of initial sampling noise
+    sampling_eta: float = 0.0               # DDIM eta (0=DDIM, 1=DDPM)
 
     # ── Generation ────────────────────────────────────────────────────────────
     num_paths: int = 128            # Futures to generate per sample
     training_paths_per_sample: int = 16   # Paths per sample during training (memory)
-    sampling_noise_scale: float = 1.0      # Scale factor on DDIM sampling noise
+    sampling_noise_scale: float = 0.25     # Scale factor on DDIM sampling noise
 
     # ── Loss weights ───────────────────────────────────────────────────────────
     weight_mse: float = 1.0

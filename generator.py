@@ -68,9 +68,9 @@ class BehaviorDiffusionGenerator(nn.Module):
 
     def forward_with_context(
         self,
-        short_seq: Tensor,           # (B, 120, 144)
-        mid_seq: Tensor,             # (B, 240, 144)
-        long_seq: Tensor,           # (B, 480, 144)
+        short_seq: Tensor,           # (B, 120, feature_dim)
+        mid_seq: Tensor,             # (B, 240, feature_dim)
+        long_seq: Tensor,           # (B, 480, feature_dim)
         clean_returns: Tensor,       # (B, K, T)  or  (B, T)
         num_paths: Optional[int] = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
@@ -82,7 +82,7 @@ class BehaviorDiffusionGenerator(nn.Module):
         B = clean_returns.shape[0]
 
         # Encode
-        B0 = self.base_encoder(short_seq, mid_seq, long_seq)           # (B, 896)
+        B0 = self.base_encoder(short_seq, mid_seq, long_seq)           # (B, behavior_dim)
 
         if clean_returns.ndim == 2:
             # Expand: (B, T) → (B, K, T)
@@ -91,11 +91,11 @@ class BehaviorDiffusionGenerator(nn.Module):
         else:
             K = clean_returns.shape[1]
 
-        B_agent, z = self.agent_module(B0, K)                          # (B, K, 896)
+        B_agent, z = self.agent_module(B0, K)                          # (B, K, behavior_dim)
 
         # Flatten for UNet
         clean_flat = clean_returns.reshape(B * K, 1, -1)               # (B*K, 1, T)
-        beh_flat = B_agent.reshape(B * K, -1)                          # (B*K, 896)
+        beh_flat = B_agent.reshape(B * K, -1)                          # (B*K, behavior_dim)
 
         # Sample timesteps and add noise
         device = clean_flat.device
@@ -123,16 +123,16 @@ class BehaviorDiffusionGenerator(nn.Module):
         """Generate future return paths via DDIM sampling.
 
         Args:
-            short_seq:  (B, 120, 144)
-            mid_seq:    (B, 240, 144)
-            long_seq:   (B, 480, 144)
+            short_seq:  (B, 120, feature_dim)
+            mid_seq:    (B, 240, feature_dim)
+            long_seq:   (B, 480, feature_dim)
             num_paths:  Number of generated futures per sample
 
         Returns:
             (paths, behaviors, base_behavior)
              paths:      (B, num_paths, horizon)  in returns space
-             behaviors:  (B, num_paths, 896)
-             base_behavior: (B, 896)
+             behaviors:  (B, num_paths, behavior_dim)
+             base_behavior: (B, behavior_dim)
         """
         return self.scheduler.sample(
             self, short_seq, mid_seq, long_seq,

@@ -83,24 +83,24 @@ class BaseBehaviorEncoder(nn.Module):
     def __init__(self, config: BehaviorGenConfig):
         super().__init__()
         cfg = config
-        bh = cfg.base_behavior_dim   # 896
+        bh = cfg.base_behavior_dim   # B0 dimension
 
         self.short_encoder = nn.GRU(
-            input_size=1,
+            input_size=cfg.feature_dim,
             hidden_size=bh,
             num_layers=cfg.gru_layers,
             batch_first=True,
             dropout=0.1 if cfg.gru_layers > 1 else 0.0,
         )
         self.mid_encoder = nn.GRU(
-            input_size=1,
+            input_size=cfg.feature_dim,
             hidden_size=bh,
             num_layers=cfg.gru_layers,
             batch_first=True,
             dropout=0.1 if cfg.gru_layers > 1 else 0.0,
         )
         self.long_encoder = nn.GRU(
-            input_size=1,
+            input_size=cfg.feature_dim,
             hidden_size=bh,
             num_layers=cfg.gru_layers,
             batch_first=True,

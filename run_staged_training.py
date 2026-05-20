@@ -43,18 +43,19 @@ from MMFPS_GEN_V2.evaluate import evaluate as run_evaluation
 STAGES = {
     "A": {
         "total_steps": 500,
-        "description": "Stabilization — bounded denoising, stable x0, no manifold pressure",
+        "description": "Pure denoising stabilization — no manifold/diversity/trend pressure, EMA disabled",
         "loss_overrides": {
             "weight_trend": 0.0,
             "weight_turning": 0.0,
             "weight_dtw": 0.0,
-            "weight_diversity": 0.0001,
-            "weight_manifold_spread": 0.0001,
+            "weight_diversity": 0.0,
+            "weight_manifold_spread": 0.0,
+            "weight_latent_sensitivity": 0.0,
         },
         "config_overrides": {
-            "base_channels": 512,
             "training_paths_per_sample": 4,
         },
+        "ema_enabled": False,
     },
     "B": {
         "total_steps": 2000,
@@ -67,7 +68,6 @@ STAGES = {
             "weight_manifold_spread": 0.005,
         },
         "config_overrides": {
-            "base_channels": 512,
             "training_paths_per_sample": 8,
         },
     },
@@ -82,7 +82,6 @@ STAGES = {
             "weight_manifold_spread": 0.01,
         },
         "config_overrides": {
-            "base_channels": 896,
             "training_paths_per_sample": 16,
         },
     },
@@ -97,7 +96,6 @@ STAGES = {
             "weight_manifold_spread": 0.02,
         },
         "config_overrides": {
-            "base_channels": 896,
             "training_paths_per_sample": 16,
         },
     },
@@ -157,12 +155,14 @@ def _run_stage(
     stage_dir.mkdir(parents=True, exist_ok=True)
 
     # Run training
+    ema_enabled = stage.get("ema_enabled", True)
     model = train(
         data_path=data_path,
         output_dir=str(stage_dir),
         config=config,
         resume_from=str(resume_from) if resume_from else None,
         device=str(device),
+        ema_enabled=ema_enabled,
     )
 
     # Find latest checkpoint

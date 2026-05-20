@@ -38,10 +38,12 @@ class DDIMScheduler:
             self.num_train_timesteps = config
             self.num_inference_steps = max(1, config // 8)  # DDIM default stride
             self.eta = 0.0
+            self.noise_scale_val = 1.0
         else:
             self.num_train_timesteps = config.diffusion_timesteps
             self.num_inference_steps = config.sampling_steps
             self.eta = config.sampling_eta
+            self.noise_scale_val = config.noise_scale
 
         # Build β schedule
         betas = self._cosine_beta_schedule(self.num_train_timesteps)
@@ -126,9 +128,9 @@ class DDIMScheduler:
 
         Args:
             model: BehaviorDiffusionGenerator (predicts noise from noisy_returns, t, context)
-            short_seq:  (B, 120, 144)
-            mid_seq:    (B, 240, 144)
-            long_seq:   (B, 480, 144)
+            short_seq:  (B, 120, feature_dim)
+            mid_seq:    (B, 240, feature_dim)
+            long_seq:   (B, 480, feature_dim)
             num_paths:  Number of future paths to generate per sample
             clip_denoised: Whether to clip predicted x0 to [-clip_range, +clip_range]
             clip_range: Max return magnitude
@@ -141,11 +143,11 @@ class DDIMScheduler:
         device = short_seq.device
 
         # Encode base behavior and generate per-path behaviors
-        B0 = model.base_encoder(short_seq, mid_seq, long_seq)      # (B, 896)
-        B_agent, z = model.agent_module(B0, num_paths)              # (B, K, 896)
+        B0 = model.base_encoder(short_seq, mid_seq, long_seq)      # (B, behavior_dim)
+        B_agent, z = model.agent_module(B0, num_paths)              # (B, K, behavior_dim)
 
-        # Initialize from pure noise
-        x_t = torch.randn(B, num_paths, T, device=device)          # (B, K, T)
+        # Initialize from scaled pure noise
+        x_t = self.noise_scale_val * torch.randn(B, num_paths, T, device=device)  # (B, K, T)
 
         # Get DDIM timestep sequence
         timesteps = self._get_inference_timesteps(device)
