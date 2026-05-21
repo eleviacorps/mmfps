@@ -65,19 +65,61 @@ class MetricsTracker:
         B, K, T = paths.shape
         metrics = {}
 
-        # Path spread: std of endpoint values across paths, averaged over batch
+        # ─── Endpoint diversity ───────────────────────────────────────
         endpoints = paths[:, :, -1]                       # (B, K)
         metrics["manifold/path_spread"] = float(endpoints.std(dim=1).mean().item())
         metrics["manifold/endpoint_range"] = float(
             (endpoints.amax(dim=1) - endpoints.amin(dim=1)).mean().item()
         )
 
-        # Unique path ratio: how many paths are "unique" (pairwise distance > threshold)
+        # ─── Pairwise path distance (are paths actually different?) ───
         paths_2d = paths.reshape(B * K, T)
         dists = torch.cdist(paths_2d, paths_2d, p=2)
         mask = ~torch.eye(B * K, device=paths.device).bool()
-        # Unique ≈ average distance large enough
         metrics["manifold/pairwise_distance"] = float(dists[mask].mean().item())
+        metrics["manifold/pairwise_distance_p90"] = float(torch.quantile(dists[mask], 0.9).item())
+
+        # ─── Manifold rank estimation ───────────────────────────────
+        # How many independent directions of variation?
+        cov = torch.cov(paths_2d.T)  # (T, T)
+        try:
+            eigvals = torch.linalg.eigvalsh(cov)
+        except RuntimeError:
+            eigvals = torch.linalg.eigvals(cov).real
+
+        eigvals = torch.clamp(eigvals, min=1e-6)
+        rank_est = (eigvals > 0.01 * eigvals.max()).sum().float()
+        metrics["manifold/estimated_rank"] = float(rank_est.item())
+
+        # ─── Behavior embedding quality (if provided) ────────────────
+        if behaviors is not None:
+            B_b, K_b, D = behaviors.shape
+            if B_b == B and K_b == K:
+                behaviors_2d = behaviors.reshape(B * K, D)
+
+                # Cosine distance between behavior embeddings
+                behavior_dists = torch.cdist(behaviors_2d, behaviors_2d, p=2)
+                metrics["manifold/behavior_distance"] = float(behavior_dists[mask].mean().item())
+
+                # Behavior embedding diversity (via covariance eigenvalues)
+                beh_centered = behaviors_2d - behaviors_2d.mean(dim=0, keepdim=True)
+                beh_cov = (beh_centered.T @ beh_centered) / max(beh_centered.shape[0] - 1, 1)
+                try:
+                    beh_eigvals = torch.linalg.eigvalsh(beh_cov)
+                except RuntimeError:
+                    beh_eigvals = torch.linalg.eigvals(beh_cov).real
+
+                beh_eigvals = torch.clamp(beh_eigvals, min=1e-6)
+                metrics["behavior_embedding/mean_eigenvalue"] = float(beh_eigvals.mean().item())
+                metrics["behavior_embedding/max_eigenvalue"] = float(beh_eigvals.max().item())
+                metrics["behavior_embedding/rank"] = float((beh_eigvals > 0.01 * beh_eigvals.max()).sum().float().item())
+
+                # Per-sample behavior variance (is each sample using latent space?)
+                beh_var_per_sample = behaviors.var(dim=1).mean(dim=1)  # (B,)
+                metrics["behavior_embedding/variance_mean"] = float(beh_var_per_sample.mean().item())
+                metrics["behavior_embedding/variance_min"] = float(beh_var_per_sample.min().item())
+
+        return metrics
         metrics["manifold/pairwise_distance_std"] = float(dists[mask].std().item())
 
         # Future variance: how much total variance exists in generated futures

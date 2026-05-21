@@ -115,11 +115,18 @@ def turning_loss(pred_returns: Tensor, target_returns: Tensor) -> Tensor:
 
 # ── Diversity pressure ──────────────────────────────────────────────────────
 
-def diversity_loss(paths: Tensor) -> Tensor:
-    """Pairwise path repulsion: maximize mean pairwise distance.
+def diversity_loss(paths: Tensor, config: BehaviorGenConfig | None = None) -> Tensor:
+    """Pairwise path repulsion: maintain minimum mean pairwise distance.
 
-    Uses negative log of mean pairwise distance — paths that are too
-    similar receive high penalty.
+    Uses margin-based formulation: penalty only if mean distance < min_distance.
+    Replaces unbounded log-based formulation to prevent gradient explosion.
+
+    Args:
+        paths: (B, K, T) generated returns
+        config: BehaviorGenConfig (for min_distance threshold)
+
+    Returns:
+        loss: scalar, 0 if mean_dist >= min_distance, else (min_distance - mean_dist)^2
     """
     B, K, T = paths.shape
     paths_2d = paths.reshape(B * K, T)                  # (B*K, T)
@@ -128,14 +135,24 @@ def diversity_loss(paths: Tensor) -> Tensor:
     mask = (~torch.eye(B * K, device=paths.device).bool())
     mean_dist = pairwise_dists[mask].mean()
 
-    return -torch.log(mean_dist + 1e-6)
+    min_distance = 0.25 if config is None else config.diversity_min_distance
+    
+    # Margin penalty: only penalize if below threshold
+    deficit = torch.relu(min_distance - mean_dist)
+    return deficit ** 2
 
 
 def latent_diversity_loss(behaviors: Tensor) -> Tensor:
-    """Encourage behavior embeddings to be diverse (covariance maximization).
+    """Encourage behavior embeddings to be diverse via eigenvalue maximization.
 
-    Maximizes the log-determinant of the behavior covariance matrix,
-    which pushes embeddings to span the available latent space.
+    Uses eigenvalue-based formulation instead of log-determinant to avoid
+    numerical instability and unbounded gradients near singular matrices.
+
+    Args:
+        behaviors: (B, K, D) per-path behavior embeddings
+
+    Returns:
+        loss: scalar, negative of mean eigenvalue (lower = more diverse)
     """
     B, K, D = behaviors.shape
     beh_flat = behaviors.reshape(-1, D)                   # (B*K, D)
@@ -144,28 +161,39 @@ def latent_diversity_loss(behaviors: Tensor) -> Tensor:
     beh_centered = beh_flat - beh_flat.mean(dim=0, keepdim=True)
 
     # Covariance
-    cov = (beh_centered.T @ beh_centered) / (beh_flat.shape[0] - 1)  # (D, D)
+    cov = (beh_centered.T @ beh_centered) / max(beh_flat.shape[0] - 1, 1)  # (D, D)
 
-    # Log-determinant: max(det) → min(-log(det))
     # Add small identity for numerical stability
     eps = 1e-3
-    cov_reg = cov + eps * torch.eye(D, device=cov.device)
+    cov_reg = cov + eps * torch.eye(D, device=cov.device, dtype=cov.dtype)
 
+    # Eigendecomposition (more stable than logdet)
     try:
-        log_det = torch.logdet(cov_reg)
-    except RuntimeError:
-        # Fallback: eigendecomposition
         eigvals = torch.linalg.eigvalsh(cov_reg)
-        log_det = torch.log(eigvals.clamp(min=1e-6)).sum()
+    except RuntimeError:
+        # Fallback: compute via SVD
+        _, eigvals, _ = torch.svd(cov_reg)
 
-    # We minimize, so negate the log-det → larger determinant = lower loss
-    return -log_det / D  # Normalize by dimension
+    # Clamp eigenvalues to avoid numerical issues
+    eigvals = torch.clamp(eigvals, min=1e-6)
+
+    # Maximize mean eigenvalue (minimize negative mean)
+    # Larger eigenvalues = more spread in latent space
+    return -eigvals.mean() / D
 
 
-def latent_sensitivity_loss(paths: Tensor) -> Tensor:
+def latent_sensitivity_loss(paths: Tensor, config: BehaviorGenConfig | None = None) -> Tensor:
     """Ensure latent variation translates to output variation.
 
+    Uses margin-based formulation instead of unbounded log penalty.
     Penalizes when different latents produce nearly identical paths.
+
+    Args:
+        paths: (B, K, T) generated returns
+        config: BehaviorGenConfig (for min_distance threshold)
+
+    Returns:
+        loss: scalar, margin-based penalty
     """
     B, K, T = paths.shape
     paths_2d = paths.reshape(B * K, T)
@@ -174,22 +202,37 @@ def latent_sensitivity_loss(paths: Tensor) -> Tensor:
     mask = (~torch.eye(B * K, device=paths.device).bool())
     mean_dist = pairwise_dists[mask].mean()
 
-    return -torch.log(mean_dist + 1e-6)
+    min_distance = 0.15 if config is None else config.latent_sensitivity_min_distance
+    
+    # Margin penalty: enforce minimum latent sensitivity
+    deficit = torch.relu(min_distance - mean_dist)
+    return deficit ** 2
 
 
 # ── Manifold spread ─────────────────────────────────────────────────────────
 
-def manifold_spread_loss(paths: Tensor) -> Tensor:
+def manifold_spread_loss(paths: Tensor, config: BehaviorGenConfig | None = None) -> Tensor:
     """Anti-collapse: encourage wide endpoint distribution.
 
+    Uses margin-based formulation instead of unbounded log penalty.
     Reward high standard deviation of final-step values across paths.
     This directly prevents all paths ending at the same price.
-    """
-    # std over all paths and batch
-    endpoints = paths[:, :, -1]                    # (B, K)
-    spread = endpoints.std(dim=1).mean()           # Mean of per-sample spread
 
-    return -torch.log(spread + 1e-6)
+    Args:
+        paths: (B, K, T) generated returns
+        config: BehaviorGenConfig (for min_spread threshold)
+
+    Returns:
+        loss: scalar, 0 if spread >= min_spread, else (min_spread - spread)^2
+    """
+    endpoints = paths[:, :, -1]                         # (B, K)
+    spread = endpoints.std(dim=1).mean()                # Mean of per-sample spread
+
+    min_spread = 0.20 if config is None else config.manifold_min_spread
+
+    # Margin penalty: only penalize if below threshold
+    deficit = torch.relu(min_spread - spread)
+    return deficit ** 2
 
 
 # ── Combined loss computation ───────────────────────────────────────────────
@@ -202,7 +245,10 @@ def compute_all_losses(
     behaviors: Tensor,
     config: BehaviorGenConfig,
 ) -> dict[str, Tensor]:
-    """Compute all training losses and return as a dict (for logging)."""
+    """Compute all training losses and return as a dict (for logging).
+    
+    Also computes per-component diagnostics to detect which loss is destabilizing.
+    """
     w = config
 
     losses = {}
@@ -217,21 +263,27 @@ def compute_all_losses(
     losses["trend_raw"] = raw_trend.detach()
 
     losses["turning"] = turning_loss(predicted_returns, target_returns)
-    losses["diversity"] = diversity_loss(predicted_returns)
+    losses["diversity"] = diversity_loss(predicted_returns, config)
     losses["latent_diversity"] = latent_diversity_loss(behaviors)
-    losses["latent_sensitivity"] = latent_sensitivity_loss(predicted_returns)
-    losses["manifold_spread"] = manifold_spread_loss(predicted_returns)
+    losses["latent_sensitivity"] = latent_sensitivity_loss(predicted_returns, config)
+    losses["manifold_spread"] = manifold_spread_loss(predicted_returns, config)
 
-    total = (
-        w.weight_mse * losses["reconstruction"]
-        + w.weight_volatility * losses["volatility"]
-        + w.weight_trend * losses["trend"]
-        + w.weight_turning * losses["turning"]
-        + w.weight_dtw * 0.0
-        + w.weight_diversity * losses["diversity"]
-        + w.weight_latent_sensitivity * losses["latent_sensitivity"]
-        + w.weight_manifold_spread * losses["manifold_spread"]
-    )
+    # ─── Compute weighted contributions ───────────────────────────────
+    weighted_losses = {
+        "reconstruction": w.weight_mse * losses["reconstruction"],
+        "volatility": w.weight_volatility * losses["volatility"],
+        "trend": w.weight_trend * losses["trend"],
+        "turning": w.weight_turning * losses["turning"],
+        "diversity": w.weight_diversity * losses["diversity"],
+        "latent_sensitivity": w.weight_latent_sensitivity * losses["latent_sensitivity"],
+        "manifold_spread": w.weight_manifold_spread * losses["manifold_spread"],
+    }
+
+    # ─── Diagnostic: magnitude of each loss component ─────────────────
+    for name, loss_val in weighted_losses.items():
+        losses[f"{name}_weighted"] = loss_val
+
+    total = sum(weighted_losses.values())
     losses["total"] = total
 
     return losses

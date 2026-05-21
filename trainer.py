@@ -22,13 +22,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from .config import BehaviorGenConfig
 from .dataset import PathDataset, build_splits, collate_fn
 from .generator import BehaviorDiffusionGenerator
 from .losses import compute_all_losses
 from .metrics_tracker import MetricsTracker
-from .safety import TrainingSafetyMonitor, check_gradients, is_stable
+from .safety import TrainingSafetyMonitor, check_gradients, is_stable, compute_gradient_health
+from .denoising_diagnostics import compute_denoising_metrics, diagnose_ddim_step_quality
 
 
 class EMAWrapper:
@@ -184,7 +186,7 @@ def train(
         train_ds,
         batch_size=cfg.batch_size,
         shuffle=True,
-        num_workers=cfg.num_workers,
+        num_workers=0,
         pin_memory=(device == "cuda"),
         drop_last=True,
         collate_fn=collate_fn,
@@ -243,6 +245,8 @@ def train(
     grad_norm = 0.0
 
     model.train()
+
+    pbar = tqdm(total=total_steps, desc="Training")
 
     train_iter = iter(train_loader)
 
@@ -307,6 +311,7 @@ def train(
             accumulation_counter = 0
             safety_monitor.record_skip()
             global_step += 1
+            pbar.update(1)
             continue
 
         # Backward
@@ -315,25 +320,50 @@ def train(
 
         if accumulation_counter >= cfg.accumulation_steps:
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                model.parameters(), cfg.max_grad_norm
+
+            # ── Gradient health analysis (read-only, no modification) ────────────
+            grad_health = compute_gradient_health(model)
+            
+            # Check for NaN/Inf BEFORE clipping
+            grads_ok, grad_stats = check_gradients(model)
+
+            # Compute unclipped norm
+            unclipped_norm = 0.0
+            for p in model.parameters():
+                if p.grad is not None:
+                    unclipped_norm += float(p.grad.norm().square())
+            unclipped_norm = math.sqrt(unclipped_norm)
+
+            # Safety decision: skip if gradients are pathological
+            should_skip = (
+                not grads_ok or
+                unclipped_norm > 100.0 or  # Massive explosion
+                unclipped_norm < 1e-6       # Vanishing
             )
 
-            # Check gradient health
-            grads_ok, grad_stats = check_gradients(model)
             safety_monitor.record_batch(
-                loss, float(grad_norm),
+                loss, float(unclipped_norm),
                 nan=grad_stats["grad_has_nan"] > 0,
                 inf=grad_stats["grad_has_inf"] > 0,
             )
 
-            if not grads_ok or safety_monitor.should_skip_step(float(grad_norm)):
-                print(f"\n[SAFETY] Unstable gradients at step {global_step}. Skipping optimizer step.")
+            if should_skip:
+                print(
+                    f"\n[SAFETY] Pathological gradients at step {global_step}. "
+                    f"unclipped_norm={unclipped_norm:.2f}, "
+                    f"has_nan={grad_stats['grad_has_nan']}, "
+                    f"has_inf={grad_stats['grad_has_inf']}. Skipping optimizer step."
+                )
                 optimizer.zero_grad(set_to_none=True)
                 accumulation_counter = 0
                 safety_monitor.record_skip()
                 global_step += 1
+                pbar.update(1)
                 continue
+
+            # If gradients are OK, apply conservative clipping
+            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+            grad_norm_clipped = sum(p.grad.norm().square() for p in model.parameters() if p.grad is not None) ** 0.5
 
             scaler.step(optimizer)
             scaler.update()
@@ -347,10 +377,18 @@ def train(
         step_metrics = {f"loss/{k}": float(v.item()) for k, v in losses.items()}
 
         with torch.no_grad():
+            # Denoising diagnostics: track DDIM convergence
+            denoising_m = compute_denoising_metrics(
+                x0_pred, noise_pred, noise_true,
+                target, noisy,
+                t, model.scheduler, cfg
+            )
+            step_metrics.update(denoising_m)
+
             manifold_m = MetricsTracker.compute_manifold_metrics(x0_pred, B_agent)
             structural_m = MetricsTracker.compute_structural_metrics(x0_pred, target)
 
-            # ── Diffusion diagnostics ────────────────────────────────
+            # ── Additional diffusion diagnostics ──────────────────
             step_metrics["diag/x0_mean"] = float(x0_pred.mean().item())
             step_metrics["diag/x0_std"] = float(x0_pred.std().item())
             step_metrics["diag/x0_min"] = float(x0_pred.min().item())
@@ -377,19 +415,16 @@ def train(
             snr_val = (alpha_t_diag / (1.0 - alpha_t_diag + 1e-8)).mean().item()
             step_metrics["diag/snr"] = float(snr_val)
 
-            # Per-timestep bin analysis (0-4: early→late noise levels)
-            t_int = t.to(torch.int32)
-            t_bin_size = max(1, cfg.diffusion_timesteps // 5)
-            for bin_i in range(5):
-                lo = bin_i * t_bin_size
-                hi = (bin_i + 1) * t_bin_size
-                bin_mask = (t_int >= lo) & (t_int < hi)
-                if bin_mask.any():
-                    mse = (noise_pred[bin_mask] - noise_true[bin_mask]).pow(2).mean().item()
-                    step_metrics[f"diag/noise_mse_t{bin_i}"] = float(mse)
 
-        step_metrics["train/grad_norm"] = float(grad_norm) if accumulation_counter == 0 else 0.0
+        step_metrics["train/grad_norm_unclipped"] = float(unclipped_norm) if accumulation_counter == 0 else 0.0
+        step_metrics["train/grad_norm_clipped"] = float(grad_norm_clipped) if accumulation_counter == 0 else 0.0
         step_metrics["train/lr"] = scheduler.get_last_lr()[0]
+        
+        # Add gradient health metrics
+        if accumulation_counter == 0:
+            for key, val in grad_health.items():
+                if isinstance(val, (int, float)):
+                    step_metrics[f"grad_health/{key}"] = float(val)
 
         safety_summary = safety_monitor.summary()
         step_metrics["safety/nan_rate"] = safety_summary["nan_rate"]
@@ -404,20 +439,17 @@ def train(
 
         # ── Logging ────────────────────────────────────────
         global_step += 1
+        pbar.update(1)
 
         if global_step % cfg.log_every == 0:
+            pbar.set_postfix({
+                "loss": f"{losses['total'].item():.4f}",
+                "x0_std": f"{step_metrics.get('diag/x0_std', 0):.4f}",
+                "spread": f"{manifold_m.get('manifold/path_spread', 0):.4f}",
+                "cov": f"{structural_m.get('structural/cone_coverage', 0):.2%}",
+                "gn": f"{step_metrics.get('train/grad_norm', 0):.2f}",
+            })
             log_entry({**step_metrics, "step": global_step, "epoch": 0})
-            print(
-                f"[{global_step}/{total_steps}] "
-                f"loss={losses['total'].item():.4f} "
-                f"recon={losses.get('reconstruction',0):.4f} "
-                f"vol={losses.get('volatility',0):.4f} "
-                f"x0_std={step_metrics.get('diag/x0_std',0):.2f} "
-                f"snr={step_metrics.get('diag/snr',0):.1f} "
-                f"gn={step_metrics.get('train/grad_norm',0):.2f} "
-                f"lr={step_metrics.get('train/lr',0):.6f}",
-                flush=True,
-            )
 
         # ── Checkpoint ─────────────────────────────────────
         if global_step % cfg.checkpoint_every == 0:

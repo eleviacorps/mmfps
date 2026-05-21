@@ -151,33 +151,53 @@ class BaseBehaviorEncoder(nn.Module):
 
 
 class AgentBehaviorModule(nn.Module):
-    """Generates per-path behavior embeddings from B0 + stochastic latents.
+    """Generates per-path behavior embeddings from B0 + learned latent structure.
 
+    Improvements:
+      - z is projected through a learnable encoder (not just random)
+      - Gating mechanism learns when to emphasize z vs. B0
+      - Per-path residual adaptation ensures behavioral diversity
+      
     For each of K paths:
-        z_i  ~ N(0, I)         // independent latent
-        B_i = f_agent(B0, z_i)  // modulated behavior
-
-    The residual design (transform + agent_mod) ensures stability while
-    the LayerNorm prevents collapse to zero-mean latents.
+        z_i  ~ N(0, I)                  // sampled stochastic vector
+        z_enc = encoder(z_i)             // learned projection → semantic space
+        gate = sigmoid(gate_net(B0, z))  // learn importance weights
+        B_i = gate·transform(B0) + (1-gate)·z_enc  // adaptive combination
     """
 
     def __init__(self, config: BehaviorGenConfig):
         super().__init__()
-        bh = config.base_behavior_dim   # 896
-        ah = config.agent_behavior_dim  # 448
+        bh = config.base_behavior_dim   # 256
+        ah = config.agent_behavior_dim  # 128
         self.agent_behavior_dim = ah    # store for forward()
 
-        # Latent modulation network
-        self.latent_net = nn.Sequential(
-            nn.Linear(bh + ah, bh),
+        # ─── Learned latent encoder ───────────────────────────────────
+        # Project raw z ~ N(0,I) into semantic behavior space
+        self.latent_encoder = nn.Sequential(
+            nn.Linear(ah, bh // 2),
             nn.SiLU(),
+            nn.Linear(bh // 2, bh),
+            nn.SiLU(),
+        )
+
+        # ─── Learned gating between base and latent ───────────────────
+        # Learn which direction to emphasize for each path
+        self.gate_net = nn.Sequential(
+            nn.Linear(bh + ah, bh // 2),
+            nn.SiLU(),
+            nn.Linear(bh // 2, bh),
+        )
+
+        # ─── Base transformation (residual branch) ────────────────────
+        self.transform_net = nn.Sequential(
             nn.Linear(bh, bh),
             nn.SiLU(),
             nn.Linear(bh, bh),
         )
 
-        # Base transformation (residual branch)
-        self.transform_net = nn.Sequential(
+        # ─── Per-path residual adaptation ────────────────────────────
+        # Fine-tune combined behavior for path-specific characteristics
+        self.path_adapt = nn.Sequential(
             nn.Linear(bh, bh),
             nn.SiLU(),
             nn.Linear(bh, bh),
@@ -194,6 +214,7 @@ class AgentBehaviorModule(nn.Module):
         """Return (B_agent, z) where B_agent is (B, K, behavior_dim)."""
         B = B0.shape[0]
 
+        # Sample or use provided latent
         if z is None:
             z = torch.randn(
                 B, num_paths, self.agent_behavior_dim,
@@ -202,11 +223,23 @@ class AgentBehaviorModule(nn.Module):
 
         B0_expanded = B0.unsqueeze(1).expand(-1, num_paths, -1)  # (B, K, bh)
 
-        combined = torch.cat([B0_expanded, z], dim=-1)           # (B, K, bh+ah)
-        agent_mod = self.latent_net(combined)
-        transformed = self.transform_net(B0_expanded)
+        # ─── Encode latent vectors ───────────────────────────────────
+        # Transform raw noise into learned semantic representation
+        z_enc = self.latent_encoder(z)  # (B, K, bh) — learned projection
 
-        B_agent = self.norm(transformed + agent_mod)
+        # ─── Learn adaptive combination ───────────────────────────────
+        # Gating learns when to use B0 vs. z_enc
+        combined = torch.cat([B0_expanded, z], dim=-1)  # (B, K, bh+ah)
+        gate_logits = self.gate_net(combined)  # (B, K, bh)
+        gate = torch.sigmoid(gate_logits)  # (B, K, bh) — soft gating
+
+        # ─── Combine with learned importance weights ──────────────────
+        # gate ≈ 1 → use B0; gate ≈ 0 → use z_enc
+        transform = self.transform_net(B0_expanded)  # (B, K, bh)
+        combined_behavior = gate * transform + (1.0 - gate) * z_enc
+
+        # ─── Per-path residual refinement ─────────────────────────────
+        B_agent = self.norm(combined_behavior + self.path_adapt(combined_behavior))
 
         return B_agent, z
 

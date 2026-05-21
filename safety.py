@@ -145,6 +145,73 @@ def clip_gradients(
     }
 
 
+def compute_gradient_health(
+    model: torch.nn.Module,
+) -> dict[str, float]:
+    """Comprehensive gradient health analysis without modifying gradients.
+
+    Returns multiple diagnostic metrics for gradient quality assessment.
+    """
+    metrics = {}
+    param_groups = {}
+    layer_norms = []
+    activation_scales = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad or param.grad is None:
+            continue
+
+        grad = param.grad
+        has_nan = bool(torch.any(torch.isnan(grad)).item())
+        has_inf = bool(torch.any(torch.isinf(grad)).item())
+
+        # Layer-wise norm
+        layer_norm = float(grad.norm().item())
+        layer_norms.append(layer_norm)
+
+        # Extract layer type from name
+        layer_type = name.split('.')[0] if '.' in name else name
+        if layer_type not in param_groups:
+            param_groups[layer_type] = {'norm': 0.0, 'count': 0, 'nan': False, 'inf': False}
+
+        param_groups[layer_type]['norm'] += layer_norm ** 2
+        param_groups[layer_type]['count'] += 1
+        param_groups[layer_type]['nan'] = param_groups[layer_type]['nan'] or has_nan
+        param_groups[layer_type]['inf'] = param_groups[layer_type]['inf'] or has_inf
+
+        # Activation scale (for ReLU/SiLU outputs)
+        if param.data.dim() > 0:
+            activation_scales.append(param.data.abs().mean().item())
+
+    # Global statistics
+    total_norm = math.sqrt(sum(ln ** 2 for ln in layer_norms)) if layer_norms else 0.0
+    metrics["grad_total_norm"] = float(total_norm)
+    metrics["grad_mean_norm"] = float(sum(layer_norms) / len(layer_norms)) if layer_norms else 0.0
+    metrics["grad_max_norm"] = float(max(layer_norms)) if layer_norms else 0.0
+    metrics["grad_min_norm"] = float(min(layer_norms)) if layer_norms else 0.0
+
+    # Ratio of max to min (condition number indicator)
+    if metrics["grad_min_norm"] > 1e-8:
+        metrics["grad_condition_number"] = metrics["grad_max_norm"] / (metrics["grad_min_norm"] + 1e-8)
+    else:
+        metrics["grad_condition_number"] = float('inf')
+
+    # Per-layer health
+    for layer_type, group in sorted(param_groups.items()):
+        group_norm = math.sqrt(group['norm'])
+        metrics[f"grad_layer/{layer_type}/norm"] = float(group_norm)
+        metrics[f"grad_layer/{layer_type}/has_nan"] = float(group['nan'])
+        metrics[f"grad_layer/{layer_type}/has_inf"] = float(group['inf'])
+
+    # Activation statistics
+    if activation_scales:
+        metrics["activation_mean_scale"] = float(sum(activation_scales) / len(activation_scales))
+        metrics["activation_max_scale"] = float(max(activation_scales))
+        metrics["activation_min_scale"] = float(min(activation_scales))
+
+    return metrics
+
+
 def check_gradients(
     model: torch.nn.Module,
 ) -> tuple[bool, dict[str, float]]:

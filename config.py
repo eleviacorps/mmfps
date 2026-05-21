@@ -69,6 +69,12 @@ class BehaviorGenConfig:
     visualize_every: int = 500
     max_samples: int = 6_000_000      # Cap on loaded samples (0 = unlimited)
 
+        # ── Bounded loss thresholds ────────────────────────────────────────
+    # Margin-based formulation: penalty only if metric below threshold
+    diversity_min_distance: float = 0.25           # Minimum mean pairwise path distance
+    manifold_min_spread: float = 0.20              # Minimum endpoint std dev
+    latent_sensitivity_min_distance: float = 0.15  # Minimum latent-variation translation
+
     # ── Data ─────────────────────────────────────────────────────────────────
     train_split: float = 0.8
     val_split: float = 0.1
