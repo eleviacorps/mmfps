@@ -43,7 +43,7 @@ class DDIMScheduler:
             self.num_train_timesteps = config.diffusion_timesteps
             self.num_inference_steps = config.sampling_steps
             self.eta = config.sampling_eta
-            self.noise_scale_val = config.noise_scale
+            self.noise_scale_val = config.sampling_noise_scale if hasattr(config, 'sampling_noise_scale') else 1.0
 
         # Build β schedule
         betas = self._cosine_beta_schedule(self.num_train_timesteps)
@@ -121,8 +121,8 @@ class DDIMScheduler:
         mid_seq: Tensor,
         long_seq: Tensor,
         num_paths: int = 128,
-        clip_denoised: bool = True,
-        clip_range: float = 0.5,
+        clip_denoised: bool = False,
+        clip_range: float = 500.0,
     ) -> Tensor:
         """Iterative DDIM reverse sampling.
 

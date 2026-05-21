@@ -29,8 +29,7 @@ from .dataset import PathDataset, build_splits, collate_fn
 from .generator import BehaviorDiffusionGenerator
 from .losses import compute_all_losses
 from .metrics_tracker import MetricsTracker
-from .safety import TrainingSafetyMonitor, check_gradients, is_stable, compute_gradient_health
-from .denoising_diagnostics import compute_denoising_metrics, diagnose_ddim_step_quality
+from .safety import TrainingSafetyMonitor, check_gradients, compute_gradient_health
 
 
 class EMAWrapper:
@@ -242,7 +241,8 @@ def train(
     # ── Training loop ───────────────────────────────────────────────
     K = cfg.training_paths_per_sample
     accumulation_counter = 0
-    grad_norm = 0.0
+    unclipped_norm = 0.0
+    grad_health = {}
 
     model.train()
 
@@ -280,27 +280,17 @@ def train(
             )
 
             noisy, noise_true = model.scheduler.add_noise(clean_flat, t)
-
             noise_pred = model(noisy, t, beh_flat)
 
             with torch.no_grad():
-                alpha_t = model.scheduler.alphas_cumprod.to(device_t)[t]
-                alpha_t = alpha_t.reshape(-1, 1, 1)
+                sqrt_ac = model.scheduler.sqrt_alpha_cumprod.to(device_t)
+                sqrt_1mac = model.scheduler.sqrt_one_minus_alpha_cumprod.to(device_t)
                 x0_pred_flat = (
-                    noisy - torch.sqrt(1.0 - alpha_t) * noise_pred
-                ) / torch.sqrt(alpha_t + 1e-4)
-                x0_pred_flat = torch.nan_to_num(
-                    x0_pred_flat, nan=0.0, posinf=5.0, neginf=-5.0,
-                )
+                    noisy - sqrt_1mac[t].reshape(-1, 1, 1) * noise_pred
+                ) / sqrt_ac[t].reshape(-1, 1, 1).clamp(min=1e-4)
                 x0_pred = x0_pred_flat.reshape(B, K, T)
 
-            losses = compute_all_losses(
-                noise_pred, noise_true,
-                predicted_returns=x0_pred,
-                target_returns=target,
-                behaviors=B_agent,
-                config=cfg,
-            )
+            losses = compute_all_losses(noise_pred, noise_true, x0_pred, target, B_agent, cfg)
 
         # ── NaN / Inf guard ─────────────────────────────────────────
         loss = losses["total"] / cfg.accumulation_steps
@@ -337,8 +327,8 @@ def train(
             # Safety decision: skip if gradients are pathological
             should_skip = (
                 not grads_ok or
-                unclipped_norm > 100.0 or  # Massive explosion
-                unclipped_norm < 1e-6       # Vanishing
+                unclipped_norm > 1000.0 or  # Massive explosion (loose threshold for 11M params)
+                unclipped_norm < 1e-8       # Vanishing
             )
 
             safety_monitor.record_batch(
@@ -355,6 +345,8 @@ def train(
                     f"has_inf={grad_stats['grad_has_inf']}. Skipping optimizer step."
                 )
                 optimizer.zero_grad(set_to_none=True)
+                scaler.step(optimizer)  # reset scaler unscale flag
+                scaler.update()
                 accumulation_counter = 0
                 safety_monitor.record_skip()
                 global_step += 1
@@ -373,67 +365,31 @@ def train(
                 ema.update()
             accumulation_counter = 0
 
-        # ── Tracking ────────────────────────────────────────
+        # ── Tracking (cheap diagnostics only) ────────────────
         step_metrics = {f"loss/{k}": float(v.item()) for k, v in losses.items()}
-
         with torch.no_grad():
-            # Denoising diagnostics: track DDIM convergence
-            denoising_m = compute_denoising_metrics(
-                x0_pred, noise_pred, noise_true,
-                target, noisy,
-                t, model.scheduler, cfg
-            )
-            step_metrics.update(denoising_m)
+            step_metrics["diag/x0_mean"] = float(x0_pred.mean().item())
+            step_metrics["diag/x0_std"] = float(x0_pred.std().item())
+            noise_mse = (noise_pred - noise_true).pow(2).mean()
+            step_metrics["diag/noise_mse"] = float(noise_mse.item())
+            alpha_t = model.scheduler.alphas_cumprod.to(device_t)[t]
+            step_metrics["diag/snr"] = float((alpha_t / (1.0 - alpha_t + 1e-8)).mean().item())
 
             manifold_m = MetricsTracker.compute_manifold_metrics(x0_pred, B_agent)
             structural_m = MetricsTracker.compute_structural_metrics(x0_pred, target)
+            step_metrics.update(manifold_m)
+            step_metrics.update(structural_m)
 
-            # ── Additional diffusion diagnostics ──────────────────
-            step_metrics["diag/x0_mean"] = float(x0_pred.mean().item())
-            step_metrics["diag/x0_std"] = float(x0_pred.std().item())
-            step_metrics["diag/x0_min"] = float(x0_pred.min().item())
-            step_metrics["diag/x0_max"] = float(x0_pred.max().item())
-            step_metrics["diag/noise_pred_mean"] = float(noise_pred.mean().item())
-            step_metrics["diag/noise_pred_std"] = float(noise_pred.std().item())
-            step_metrics["diag/path_amplitude"] = float(
-                (x0_pred.amax(dim=-1) - x0_pred.amin(dim=-1)).mean().item()
-            )
-            step_metrics["diag/pct_finite"] = float(
-                is_stable(x0_pred)
-            )
-
-            # Timestep-wise noise prediction MSE (per-sample)
-            noise_mse_per = (noise_pred - noise_true).pow(2).mean(dim=(1, 2))
-            step_metrics["diag/noise_mse_mean"] = float(noise_mse_per.mean().item())
-            step_metrics["diag/noise_mse_std"] = float(noise_mse_per.std().item())
-
-            # x0 variance over time
-            step_metrics["diag/x0_variance"] = float(x0_pred.var().item())
-
-            # Signal / noise ratio at sampled timesteps
-            alpha_t_diag = model.scheduler.alphas_cumprod.to(device_t)[t]
-            snr_val = (alpha_t_diag / (1.0 - alpha_t_diag + 1e-8)).mean().item()
-            step_metrics["diag/snr"] = float(snr_val)
-
-
-        step_metrics["train/grad_norm_unclipped"] = float(unclipped_norm) if accumulation_counter == 0 else 0.0
-        step_metrics["train/grad_norm_clipped"] = float(grad_norm_clipped) if accumulation_counter == 0 else 0.0
         step_metrics["train/lr"] = scheduler.get_last_lr()[0]
-        
-        # Add gradient health metrics
         if accumulation_counter == 0:
+            step_metrics["train/grad_norm"] = float(unclipped_norm)
             for key, val in grad_health.items():
                 if isinstance(val, (int, float)):
                     step_metrics[f"grad_health/{key}"] = float(val)
 
-        safety_summary = safety_monitor.summary()
-        step_metrics["safety/nan_rate"] = safety_summary["nan_rate"]
-        step_metrics["safety/inf_rate"] = safety_summary["inf_rate"]
-        step_metrics["safety/skip_rate"] = safety_summary["skip_rate"]
-        step_metrics["safety/ema_grad_norm"] = safety_summary["ema_grad_norm"]
-
-        step_metrics.update(manifold_m)
-        step_metrics.update(structural_m)
+        safety = safety_monitor.summary()
+        step_metrics["safety/skip_rate"] = safety["skip_rate"]
+        step_metrics["safety/ema_grad_norm"] = safety["ema_grad_norm"]
 
         tracker.update(step_metrics)
 
@@ -443,11 +399,12 @@ def train(
 
         if global_step % cfg.log_every == 0:
             pbar.set_postfix({
-                "loss": f"{losses['total'].item():.4f}",
-                "x0_std": f"{step_metrics.get('diag/x0_std', 0):.4f}",
-                "spread": f"{manifold_m.get('manifold/path_spread', 0):.4f}",
-                "cov": f"{structural_m.get('structural/cone_coverage', 0):.2%}",
+                "L": f"{step_metrics.get('loss/total', 0):.3f}",
+                "rec": f"{step_metrics.get('loss/reconstruction', 0):.3f}",
+                "x0s": f"{step_metrics.get('diag/x0_std', 0):.4f}",
+                "nmse": f"{step_metrics.get('diag/noise_mse', 0):.4f}",
                 "gn": f"{step_metrics.get('train/grad_norm', 0):.2f}",
+                "cov": f"{structural_m.get('structural/cone_coverage', 0):.2%}",
             })
             log_entry({**step_metrics, "step": global_step, "epoch": 0})
 
@@ -498,6 +455,7 @@ def _viz_callback(
     viz_dir.mkdir(parents=True, exist_ok=True)
 
     model.eval()
+    model.scheduler.noise_scale_val = 1.0  # unit-variance initial noise
     indices = np.random.choice(
         len(val_ds), size=min(num_samples, len(val_ds)), replace=False
     )

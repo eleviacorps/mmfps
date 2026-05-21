@@ -46,6 +46,7 @@ def evaluate(
     model = BehaviorDiffusionGenerator(ckpt.get("config", cfg)).to(device_t)
     model.load_state_dict(ckpt["model_state_dict"])
     model.eval()
+    model.scheduler.noise_scale_val = 1.0  # override: unit-variance initial noise
 
     # Load validation data
     val_ds = PathDataset(data_path, cfg, split="val")

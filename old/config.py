@@ -41,7 +41,7 @@ class BehaviorGenConfig:
     # ── Generation ────────────────────────────────────────────────────────────
     num_paths: int = 128            # Futures to generate per sample
     training_paths_per_sample: int = 16   # Paths per sample during training (memory)
-    sampling_noise_scale: float = 0.25     # Scale factor on DDIM sampling noise
+    sampling_noise_scale: float = 1.0      # Initial DDIM noise std (must match training distribution)
 
     # ── Loss weights ───────────────────────────────────────────────────────────
     weight_mse: float = 1.0

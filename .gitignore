@@ -4,6 +4,9 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+download/
+node_modules/
+tools/
 
 # Virtual environment
 .venv/

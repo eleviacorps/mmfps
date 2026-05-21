@@ -1,0 +1,5 @@
+{
+  "devDependencies": {
+    "dukascopy-node": "^1.46.4"
+  }
+}

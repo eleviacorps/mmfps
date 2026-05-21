@@ -24,6 +24,25 @@ class Sample:
     sample_idx: int            # Index in original array
 
 
+def _rolling_std(x: np.ndarray, w: int) -> np.ndarray:
+    """Vectorized rolling std using convolution-based approach."""
+    ones = np.ones(w, dtype=np.float64)
+    x_f64 = x.astype(np.float64)
+    mean = np.convolve(x_f64, ones / w, mode='same')
+    var = np.convolve(x_f64 ** 2, ones / w, mode='same') - mean ** 2
+    np.maximum(var, 0.0, out=var)
+    std = np.sqrt(var)
+    std[:w - 1] = 0.0
+    return std.astype(np.float32)
+
+
+def _rolling_mean(x: np.ndarray, w: int) -> np.ndarray:
+    """Vectorized rolling mean using convolution."""
+    out = np.convolve(x.astype(np.float64), np.ones(w, dtype=np.float64) / w, mode='same')
+    out[:w - 1] = 0.0
+    return out.astype(np.float32)
+
+
 def _build_feature_table(prices: np.ndarray, feature_dim: int) -> np.ndarray:
     """Build (T, feature_dim) derived feature matrix from 1D price series.
 
@@ -48,39 +67,33 @@ def _build_feature_table(prices: np.ndarray, feature_dim: int) -> np.ndarray:
     safe_ratio = np.abs(prices[1:] / (np.abs(prices[:-1]) + eps))
     log_ret[1:] = np.log(np.maximum(safe_ratio, eps))
 
-    vol_5 = np.zeros(T, dtype=np.float32)
-    vol_20 = np.zeros(T, dtype=np.float32)
-    ret_pad = np.concatenate([np.zeros(19, dtype=np.float32), ret])
-    for t in range(1, T):
-        vol_5[t] = np.std(ret_pad[t + 19 - 4:t + 20])
-        vol_20[t] = np.std(ret_pad[t + 19 - 19:t + 20])
+    # Vectorized rolling volatility
+    vol_5 = _rolling_std(ret, 5)
+    vol_20 = _rolling_std(ret, 20)
 
-    sma_20 = np.zeros(T, dtype=np.float32)
-    cum = np.cumsum(prices)
-    for t in range(T):
-        if t >= 19:
-            s = (cum[t] - (cum[t - 20] if t >= 20 else 0)) / 20.0
-            sma_20[t] = s
+    # Vectorized SMA-20
+    sma_20 = _rolling_mean(prices, 20)
 
     momentum = np.zeros(T, dtype=np.float32)
     mask_20 = sma_20 > eps
     momentum[mask_20] = (prices[mask_20] / sma_20[mask_20]) - 1.0
 
+    # EMA-10 (sequential but fast single loop)
     ema_ratio = np.zeros(T, dtype=np.float32)
     alpha = 2.0 / 11.0
-    ema = prices[0]
+    ema = float(prices[0])
     for t in range(T):
-        ema = alpha * prices[t] + (1.0 - alpha) * ema
+        ema = alpha * float(prices[t]) + (1.0 - alpha) * ema
         if ema > eps:
-            ema_ratio[t] = (prices[t] / ema) - 1.0
+            ema_ratio[t] = (float(prices[t]) / ema) - 1.0
 
+    # Vectorized rolling z-score of returns (window=20)
     zscore = np.zeros(T, dtype=np.float32)
-    for t in range(1, T):
-        seg = ret[max(0, t - 20):t + 1]
-        if len(seg) > 1:
-            m, s = float(np.mean(seg)), float(np.std(seg))
-            if s > eps:
-                zscore[t] = (ret[t] - m) / s
+    ret_mean = _rolling_mean(ret, 20)
+    ret_std = _rolling_std(ret, 20)
+    mask_std = ret_std > eps
+    zscore[mask_std] = (ret[mask_std] - ret_mean[mask_std]) / ret_std[mask_std]
+    zscore[0] = 0.0
 
     price_z = (prices - float(np.mean(prices))) / (float(np.std(prices)) + eps)
 
