@@ -7,7 +7,7 @@ build/
 download/
 node_modules/
 tools/
-
+features/
 # Virtual environment
 .venv/
 
