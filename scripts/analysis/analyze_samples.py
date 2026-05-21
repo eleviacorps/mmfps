@@ -41,7 +41,7 @@ def analyze_samples(
         short = sample.short_seq.unsqueeze(0).to(device_t)
         mid = sample.mid_seq.unsqueeze(0).to(device_t)
         long = sample.long_seq.unsqueeze(0).to(device_t)
-        all_targets.append(sample.target.numpy())
+        all_targets.append(sample.target.numpy() / model.config.target_scale)
 
         paths, _, _ = model.generate(short, mid, long, num_paths=num_paths)
         all_paths.append(paths[0].cpu().numpy())

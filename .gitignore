@@ -8,9 +8,10 @@ download/
 node_modules/
 tools/
 features/
+checkpoints/
 # Virtual environment
 .venv/
-
+temp/
 # Large data files
 *.npy
 *.npz

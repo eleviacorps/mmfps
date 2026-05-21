@@ -135,10 +135,13 @@ def _load_checkpoint(
     scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
     ema: EMAWrapper,
     device: torch.device,
+    weights_only: bool = False,
 ) -> int:
     """Load training state. Returns global step."""
     ckpt = torch.load(path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
+    if weights_only:
+        return 0
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler and ckpt.get("scheduler_state_dict"):
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
@@ -154,6 +157,7 @@ def train(
     resume_from: Optional[str] = None,
     device: Optional[str] = None,
     ema_enabled: bool = True,
+    resume_weights_only: bool = False,
 ) -> BehaviorDiffusionGenerator:
     """Run full training pipeline.
 
@@ -218,9 +222,11 @@ def train(
     global_step = 0
     if resume_from and Path(resume_from).exists():
         global_step = _load_checkpoint(
-            Path(resume_from), model, optimizer, scheduler, ema, device_t
+            Path(resume_from), model, optimizer, scheduler, ema, device_t,
+            weights_only=resume_weights_only,
         )
-        print(f"Resumed from {resume_from} at step {global_step}")
+        mode = "weights only" if resume_weights_only else f"step {global_step}"
+        print(f"Resumed from {resume_from} ({mode})")
 
     # ── Logging ────────────────────────────────────────────────────
     log_path = output_dir / "training_log.jsonl"

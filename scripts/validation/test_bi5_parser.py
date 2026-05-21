@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from download_xauusd import download_day, merge_and_save
+from scripts.data_creation.download_xauusd import download_day, merge_and_save
 from datetime import datetime, timezone
 
 # Test May 18, 2026 - we have verified CSV for this

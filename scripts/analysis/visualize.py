@@ -124,26 +124,27 @@ def viz_denoising(
     plt = _setup_matplotlib()
     device_t = torch.device(device)
 
-    B0 = model.base_encoder(short_seq.unsqueeze(0).to(device_t),
-                            mid_seq.unsqueeze(0).to(device_t),
-                            long_seq.unsqueeze(0).to(device_t))
-    B_agent, _ = model.agent_module(B0, 1)
+    with torch.no_grad():
+        B0 = model.base_encoder(short_seq.unsqueeze(0).to(device_t),
+                                mid_seq.unsqueeze(0).to(device_t),
+                                long_seq.unsqueeze(0).to(device_t))
+        B_agent, _ = model.agent_module(B0, 1)
 
-    scheduler = model.scheduler
-    T = model.config.path_horizon
-    timesteps = scheduler._get_inference_timesteps(device_t)
-    step_indices = np.linspace(0, len(timesteps) - 1, num_snapshots, dtype=int)
+        scheduler = model.scheduler
+        T = model.config.path_horizon
+        timesteps = scheduler._get_inference_timesteps(device_t)
+        step_indices = np.linspace(0, len(timesteps) - 1, num_snapshots, dtype=int)
 
-    x_t = torch.randn(1, 1, T, device=device_t)
-    snapshots = []
+        x_t = torch.randn(1, 1, T, device=device_t)
+        snapshots = []
 
-    for i, t in enumerate(timesteps):
-        t_batch = t.unsqueeze(0).expand(1)
-        eps_pred = model.unet(x_t, t_batch, B_agent[:, 0, :])
-        eps_pred = eps_pred.reshape(1, 1, T)
-        x_t = scheduler._ddim_step(x_t, eps_pred, t.item(), i < len(timesteps) - 1)
-        if i in step_indices:
-            snapshots.append((i, x_t[0, 0].cpu().numpy().copy()))
+        for i, t in enumerate(timesteps):
+            t_batch = t.unsqueeze(0).expand(1)
+            eps_pred = model.unet(x_t, t_batch, B_agent[:, 0, :])
+            eps_pred = eps_pred.reshape(1, 1, T)
+            x_t = scheduler._ddim_step(x_t, eps_pred, t.item(), i < len(timesteps) - 1)
+            if i in step_indices:
+                snapshots.append((i, x_t[0, 0].detach().cpu().numpy().copy()))
 
     fig, axes = plt.subplots(2, 3, figsize=(14, 8))
     axes = axes.flatten()
@@ -182,7 +183,7 @@ def main():
 
     for i in range(args.num_samples):
         sample = ds[args.data_index + i]
-        target = sample.target.numpy()
+        target = sample.target.numpy() / model.config.target_scale
         viz_generate(
             model,
             sample.short_seq, sample.mid_seq, sample.long_seq,
