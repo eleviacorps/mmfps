@@ -59,8 +59,9 @@ class BehaviorGenConfig:
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
     warmup_steps: int = 2000
-    max_grad_norm: float = 1.0
+    max_grad_norm: float = 10.0
     ema_decay: float = 0.9999
+    num_workers: int = 0             # Data loader workers (0=main thread, avoids Windows spawn overhead)
 
     # ── Checkpoints / logging ──────────────────────────────────────────────────
     checkpoint_every: int = 1000

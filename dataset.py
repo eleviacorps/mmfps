@@ -50,9 +50,10 @@ def _build_feature_table(prices: np.ndarray, feature_dim: int) -> np.ndarray:
 
     vol_5 = np.zeros(T, dtype=np.float32)
     vol_20 = np.zeros(T, dtype=np.float32)
+    ret_pad = np.concatenate([np.zeros(19, dtype=np.float32), ret])
     for t in range(1, T):
-        vol_5[t] = np.std(ret[max(0, t - 4):t + 1])
-        vol_20[t] = np.std(ret[max(0, t - 19):t + 1])
+        vol_5[t] = np.std(ret_pad[t + 19 - 4:t + 20])
+        vol_20[t] = np.std(ret_pad[t + 19 - 19:t + 20])
 
     sma_20 = np.zeros(T, dtype=np.float32)
     cum = np.cumsum(prices)

@@ -22,7 +22,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from .config import BehaviorGenConfig
 from .dataset import PathDataset, build_splits, collate_fn
@@ -185,7 +184,7 @@ def train(
         train_ds,
         batch_size=cfg.batch_size,
         shuffle=True,
-        num_workers=0,
+        num_workers=cfg.num_workers,
         pin_memory=(device == "cuda"),
         drop_last=True,
         collate_fn=collate_fn,
@@ -244,8 +243,6 @@ def train(
     grad_norm = 0.0
 
     model.train()
-
-    pbar = tqdm(total=total_steps, desc="Training")
 
     train_iter = iter(train_loader)
 
@@ -310,7 +307,6 @@ def train(
             accumulation_counter = 0
             safety_monitor.record_skip()
             global_step += 1
-            pbar.update(1)
             continue
 
         # Backward
@@ -337,7 +333,6 @@ def train(
                 accumulation_counter = 0
                 safety_monitor.record_skip()
                 global_step += 1
-                pbar.update(1)
                 continue
 
             scaler.step(optimizer)
@@ -409,17 +404,20 @@ def train(
 
         # ── Logging ────────────────────────────────────────
         global_step += 1
-        pbar.update(1)
 
         if global_step % cfg.log_every == 0:
-            pbar.set_postfix({
-                "loss": f"{losses['total'].item():.4f}",
-                "x0_std": f"{step_metrics.get('diag/x0_std', 0):.4f}",
-                "spread": f"{manifold_m.get('manifold/path_spread', 0):.4f}",
-                "cov": f"{structural_m.get('structural/cone_coverage', 0):.2%}",
-                "gn": f"{step_metrics.get('train/grad_norm', 0):.2f}",
-            })
             log_entry({**step_metrics, "step": global_step, "epoch": 0})
+            print(
+                f"[{global_step}/{total_steps}] "
+                f"loss={losses['total'].item():.4f} "
+                f"recon={losses.get('reconstruction',0):.4f} "
+                f"vol={losses.get('volatility',0):.4f} "
+                f"x0_std={step_metrics.get('diag/x0_std',0):.2f} "
+                f"snr={step_metrics.get('diag/snr',0):.1f} "
+                f"gn={step_metrics.get('train/grad_norm',0):.2f} "
+                f"lr={step_metrics.get('train/lr',0):.6f}",
+                flush=True,
+            )
 
         # ── Checkpoint ─────────────────────────────────────
         if global_step % cfg.checkpoint_every == 0:

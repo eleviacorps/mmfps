@@ -42,7 +42,7 @@ from MMFPS_GEN_V2.evaluate import evaluate as run_evaluation
 
 STAGES = {
     "A": {
-        "total_steps": 500,
+        "total_steps": 1000,
         "description": "Pure denoising stabilization — no manifold/diversity/trend pressure, EMA disabled",
         "loss_overrides": {
             "weight_trend": 0.0,
@@ -227,7 +227,7 @@ def main():
         choices=["A", "B", "C", "D", "all"],
         help="Which stage to run (A=500, B=2000, C=5000, D=10000, all=sequential A→D)",
     )
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=5e-5)
     parser.add_argument("--resume-from", type=str, default=None,
                         help="Resume from an existing checkpoint")
