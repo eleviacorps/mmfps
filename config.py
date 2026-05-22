@@ -81,6 +81,7 @@ class BehaviorGenConfig:
     # ── Target normalization ───────────────────────────────────────────────────
     target_scale: float = 1.0          # Multiplier to bring targets to unit variance
                                        # (auto-computed from training data in build_splits)
+    min_target_std: float = 1e-8        # Reject stale/flat future windows
 
     # ── Data paths ─────────────────────────────────────────────────────────────
     data_dir: str = "data"

@@ -12,6 +12,7 @@ checkpoints/
 # Virtual environment
 .venv/
 temp/
+.commandcode/
 # Large data files
 *.npy
 *.npz

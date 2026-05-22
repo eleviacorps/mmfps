@@ -52,7 +52,9 @@ def evaluate(
     tight_cone_success = 0
     closest_distance_sum = 0.0
     scaled_distance_sum = 0.0
+    scaled_distances = []
     variance_ratios = []
+    worst_samples = []
     direction_hits = 0
     best_direction_hits = 0
     closest_path_found = 0    # best composite matches best MSE
@@ -87,6 +89,8 @@ def evaluate(
         min_err = sq_errors.min()
         target_var = float(np.var(target) + 1e-12)
         scaled_min_err = float(min_err / target_var)
+        gen_var = float(np.var(paths_np))
+        variance_ratio = float(gen_var / target_var)
         composite = (
             sq_errors
             + 0.25 * magnitude_errors
@@ -99,7 +103,8 @@ def evaluate(
 
         closest_distance_sum += float(min_err)
         scaled_distance_sum += scaled_min_err
-        variance_ratios.append(float(np.var(paths_np) / target_var))
+        scaled_distances.append(scaled_min_err)
+        variance_ratios.append(variance_ratio)
 
         # Generator success: at least one path is close
         if min_err < failure_threshold:
@@ -120,6 +125,19 @@ def evaluate(
 
         target_direction = np.sign(target[-1] - target[0])
         path_directions = np.sign(paths_np[:, -1] - paths_np[:, 0])
+        worst_samples.append({
+            "sample_index": int(i),
+            "scaled_min_error": scaled_min_err,
+            "min_error": float(min_err),
+            "target_var": target_var,
+            "target_std": float(np.std(target)),
+            "generated_var": gen_var,
+            "variance_ratio": variance_ratio,
+            "target_abs_max": float(np.max(np.abs(target))),
+            "generated_abs_max": float(np.max(np.abs(paths_np))),
+            "best_mse_direction_match": bool(path_directions[mse_best_idx] == target_direction),
+            "mse_best_idx": mse_best_idx,
+        })
         if np.any(path_directions == target_direction):
             direction_hits += 1
         if path_directions[mse_best_idx] == target_direction:
@@ -144,6 +162,11 @@ def evaluate(
             "cone": f"{cone_success / total:.2%}",
         })
 
+    scaled_arr = np.asarray(scaled_distances, dtype=np.float64)
+    variance_arr = np.asarray(variance_ratios, dtype=np.float64)
+    worst_by_scaled = sorted(worst_samples, key=lambda x: x["scaled_min_error"], reverse=True)[:20]
+    worst_by_variance = sorted(worst_samples, key=lambda x: x["variance_ratio"], reverse=True)[:20]
+
     results = {
         "num_samples": total,
         "num_paths": num_paths,
@@ -156,6 +179,32 @@ def evaluate(
         "mean_scaled_closest_distance": scaled_distance_sum / total if total else 0.0,
         "mean_variance_ratio": float(np.mean(variance_ratios)) if variance_ratios else 0.0,
         "median_variance_ratio": float(np.median(variance_ratios)) if variance_ratios else 0.0,
+        "scaled_closest_distance_percentiles": {
+            "p50": float(np.percentile(scaled_arr, 50)) if total else 0.0,
+            "p75": float(np.percentile(scaled_arr, 75)) if total else 0.0,
+            "p90": float(np.percentile(scaled_arr, 90)) if total else 0.0,
+            "p95": float(np.percentile(scaled_arr, 95)) if total else 0.0,
+            "p99": float(np.percentile(scaled_arr, 99)) if total else 0.0,
+            "max": float(np.max(scaled_arr)) if total else 0.0,
+        },
+        "variance_ratio_percentiles": {
+            "p50": float(np.percentile(variance_arr, 50)) if total else 0.0,
+            "p75": float(np.percentile(variance_arr, 75)) if total else 0.0,
+            "p90": float(np.percentile(variance_arr, 90)) if total else 0.0,
+            "p95": float(np.percentile(variance_arr, 95)) if total else 0.0,
+            "p99": float(np.percentile(variance_arr, 99)) if total else 0.0,
+            "max": float(np.max(variance_arr)) if total else 0.0,
+        },
+        "outlier_rates": {
+            "scaled_mse_gt_10": float(np.mean(scaled_arr > 10.0)) if total else 0.0,
+            "scaled_mse_gt_100": float(np.mean(scaled_arr > 100.0)) if total else 0.0,
+            "scaled_mse_gt_1000": float(np.mean(scaled_arr > 1000.0)) if total else 0.0,
+            "variance_ratio_gt_10": float(np.mean(variance_arr > 10.0)) if total else 0.0,
+            "variance_ratio_gt_100": float(np.mean(variance_arr > 100.0)) if total else 0.0,
+            "variance_ratio_gt_1000": float(np.mean(variance_arr > 1000.0)) if total else 0.0,
+        },
+        "worst_by_scaled_error": worst_by_scaled,
+        "worst_by_variance_ratio": worst_by_variance,
         "direction_coverage_rate": direction_hits / total if total else 0.0,
         "best_mse_direction_match_rate": best_direction_hits / total if total else 0.0,
         "trending_success_rate": trending_success / trending_count if trending_count else 0.0,
@@ -189,6 +238,18 @@ def main():
     print(f"Mean scaled closest dist: {results['mean_scaled_closest_distance']:.4f}")
     print(f"Calibrated success <1x:   {results['calibrated_success_rate_scaled_mse_lt_1']:.2%}")
     print(f"Variance ratio mean/med:  {results['mean_variance_ratio']:.3f} / {results['median_variance_ratio']:.3f}")
+    print(
+        "Scaled dist p50/p95/p99: "
+        f"{results['scaled_closest_distance_percentiles']['p50']:.3f} / "
+        f"{results['scaled_closest_distance_percentiles']['p95']:.3f} / "
+        f"{results['scaled_closest_distance_percentiles']['p99']:.3f}"
+    )
+    print(
+        "Variance p50/p95/p99:    "
+        f"{results['variance_ratio_percentiles']['p50']:.3f} / "
+        f"{results['variance_ratio_percentiles']['p95']:.3f} / "
+        f"{results['variance_ratio_percentiles']['p99']:.3f}"
+    )
     print(f"Direction coverage:       {results['direction_coverage_rate']:.2%}")
     print(f"Best-MSE direction match: {results['best_mse_direction_match_rate']:.2%}")
     print(f"Trending success:         {results['trending_success_rate']:.2%}")

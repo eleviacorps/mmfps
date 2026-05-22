@@ -59,6 +59,7 @@ class PathDataset(Dataset):
             )
 
         self.start_indices = _compute_valid_starts(
+            targets=self.targets,
             timestamps=self.timestamps,
             session_ids=self.session_ids,
             target_valid=self.target_valid,
@@ -66,6 +67,7 @@ class PathDataset(Dataset):
             h_path=h_path,
             val_split_ts=self.cfg.val_split_ts,
             test_split_ts=self.cfg.test_split_ts,
+            min_target_std=self.cfg.min_target_std,
             split=split,
         )
         self.max_samples = len(self.start_indices)
@@ -116,6 +118,7 @@ def collate_fn(samples: list[Sample]) -> Sample:
 
 
 def _compute_valid_starts(
+    targets: np.ndarray,
     timestamps: np.ndarray,
     session_ids: np.ndarray,
     target_valid: np.ndarray,
@@ -123,6 +126,7 @@ def _compute_valid_starts(
     h_path: int,
     val_split_ts: int,
     test_split_ts: int,
+    min_target_std: float,
     split: Literal["train", "val", "test"],
 ) -> np.ndarray:
     """Return start indices for session-pure, temporally split samples.
@@ -158,7 +162,17 @@ def _compute_valid_starts(
     future_invalid_count = invalid_cum[future_end] - invalid_cum[context_end]
     future_targets_valid = future_invalid_count == 0
 
-    valid = split_mask & same_session & future_targets_valid
+    target_values = np.asarray(targets, dtype=np.float64)
+    target_cum = np.concatenate(([0.0], np.cumsum(target_values)))
+    target_sq_cum = np.concatenate(([0.0], np.cumsum(target_values * target_values)))
+    future_sum = target_cum[future_end] - target_cum[context_end]
+    future_sq_sum = target_sq_cum[future_end] - target_sq_cum[context_end]
+    future_mean = future_sum / h_path
+    future_var = np.maximum(future_sq_sum / h_path - future_mean * future_mean, 0.0)
+    future_std = np.sqrt(future_var)
+    future_active = future_std >= min_target_std
+
+    valid = split_mask & same_session & future_targets_valid & future_active
     return starts[valid]
 
 
