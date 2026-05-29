@@ -193,6 +193,51 @@ Visualize generated paths:
 .\.venv\Scripts\python.exe -m scripts.analysis.visualize --checkpoint checkpoints\pure_recon\step_5000_final.pt --output-dir checkpoints\pure_recon\viz_manual --num-samples 4 --num-paths 128 --data-index 0
 ```
 
+## Live Emergence Dashboard
+
+Emit a fixed-latent 128-path snapshot from an existing checkpoint:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\emergence_live --split val --num-scenarios 8 --num-paths 128 --seed 1234
+```
+
+Open:
+
+```text
+visual_outputs\emergence_live\dashboard.html
+```
+
+For auto-refresh while training emits new snapshots, open:
+
+```text
+visual_outputs\emergence_live\dashboard.html?live=1
+```
+
+Enable checkpoint-driven dashboard snapshots during pure reconstruction training:
+
+```powershell
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\pure_recon_live --steps 5000 --emergence-snapshot-every 1000 --emergence-snapshot-dir visual_outputs\pure_recon_live --emergence-num-scenarios 8 --emergence-num-paths 128 --emergence-seed 1234
+```
+
+Enable the same snapshots during Phase B1:
+
+```powershell
+.\.venv\Scripts\python.exe run_phase_b1.py --resume checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\phase_b1_live --steps 1500 --emergence-snapshot-every 500 --emergence-snapshot-dir visual_outputs\phase_b1_live --emergence-num-scenarios 8 --emergence-num-paths 128 --emergence-seed 1234
+```
+
+Rebuild the dashboard from existing snapshots:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots build-dashboard --snapshot-root visual_outputs\phase_b1_live
+```
+
+Dashboard artifacts:
+
+- `scenario_suite.json`: fixed validation scenarios reused across checkpoints.
+- `step_XXXXXX\snapshot.npz`: context, real future, 128 generated futures, latent vectors, denoising states.
+- `step_XXXXXX\metrics.json`: per-scenario and per-path metrics.
+- `dashboard.html`: local dashboard with checkpoint replay, 128 path tiles, detail view, best-path highlighting, and denoising progression.
+
 Compute offline structural metrics for generated chunks:
 
 ```powershell
@@ -205,4 +250,3 @@ Compute offline structural metrics for generated chunks:
 - Do not resume old checkpoints for final conclusions.
 - Watch DDIM trajectory, latent diversity, variance collapse, and high-noise timestep behavior.
 - Only add structural losses gradually after pure diffusion produces believable stochastic futures.
-

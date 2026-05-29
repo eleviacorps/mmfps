@@ -27,6 +27,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--training-paths-per-sample", type=int, default=16)
     parser.add_argument("--vol-weight", type=float, default=0.03)
     parser.add_argument("--turning-weight", type=float, default=0.01)
+    parser.add_argument("--emergence-snapshot-every", type=int, default=0)
+    parser.add_argument("--emergence-snapshot-dir", default=None)
+    parser.add_argument("--emergence-num-scenarios", type=int, default=8)
+    parser.add_argument("--emergence-num-paths", type=int, default=128)
+    parser.add_argument("--emergence-seed", type=int, default=1234)
     parser.add_argument(
         "--full-resume",
         action="store_true",
@@ -66,4 +71,9 @@ if __name__ == "__main__":
         config=build_config(args),
         resume_from=args.resume,
         resume_weights_only=not args.full_resume,
+        emergence_snapshot_every=args.emergence_snapshot_every,
+        emergence_snapshot_dir=args.emergence_snapshot_dir,
+        emergence_num_scenarios=args.emergence_num_scenarios,
+        emergence_num_paths=args.emergence_num_paths,
+        emergence_seed=args.emergence_seed,
     )

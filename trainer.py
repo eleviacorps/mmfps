@@ -158,6 +158,11 @@ def train(
     device: Optional[str] = None,
     ema_enabled: bool = True,
     resume_weights_only: bool = False,
+    emergence_snapshot_every: int = 0,
+    emergence_snapshot_dir: Optional[str] = None,
+    emergence_num_scenarios: int = 8,
+    emergence_num_paths: int = 128,
+    emergence_seed: int = 1234,
 ) -> BehaviorDiffusionGenerator:
     """Run full training pipeline.
 
@@ -231,6 +236,7 @@ def train(
     # ── Logging ────────────────────────────────────────────────────
     log_path = output_dir / "training_log.jsonl"
     buf = []
+    snapshot_root = Path(emergence_snapshot_dir) if emergence_snapshot_dir else output_dir / "emergence_snapshots"
 
     def log_entry(data: dict) -> None:
         entry = {"timestamp": datetime.utcnow().isoformat(), **data}
@@ -429,6 +435,18 @@ def train(
                 global_step, 0, tracker.summary(), output_dir
             )
             print(f"\nCheckpoint: {path}")
+            if emergence_snapshot_every > 0 and global_step % emergence_snapshot_every == 0:
+                _emergence_snapshot_callback(
+                    model=model,
+                    val_ds=val_ds,
+                    snapshot_root=snapshot_root,
+                    checkpoint_path=path,
+                    step=global_step,
+                    device=device_t,
+                    num_scenarios=emergence_num_scenarios,
+                    num_paths=emergence_num_paths,
+                    seed=emergence_seed,
+                )
 
         # ── Visualization ───────────────────────────────────
         if global_step % cfg.visualize_every == 0:
@@ -443,8 +461,53 @@ def train(
         global_step, 0, tracker.summary(), output_dir, tag="final"
     )
     print(f"Final checkpoint: {final_path}")
+    if emergence_snapshot_every > 0:
+        _emergence_snapshot_callback(
+            model=model,
+            val_ds=val_ds,
+            snapshot_root=snapshot_root,
+            checkpoint_path=final_path,
+            step=global_step,
+            device=device_t,
+            num_scenarios=emergence_num_scenarios,
+            num_paths=emergence_num_paths,
+            seed=emergence_seed,
+        )
 
     return model
+
+
+def _emergence_snapshot_callback(
+    model: BehaviorDiffusionGenerator,
+    val_ds: PathDataset,
+    snapshot_root: Path,
+    checkpoint_path: Path,
+    step: int,
+    device: torch.device,
+    num_scenarios: int,
+    num_paths: int,
+    seed: int,
+) -> None:
+    """Emit a fixed-latent dashboard snapshot without affecting training."""
+    try:
+        from scripts.dashboard.emergence_snapshots import emit_emergence_snapshot
+
+        snapshot_dir = emit_emergence_snapshot(
+            model=model,
+            val_ds=val_ds,
+            output_root=snapshot_root,
+            step=step,
+            checkpoint_path=checkpoint_path,
+            split="val",
+            num_scenarios=num_scenarios,
+            num_paths=num_paths,
+            seed=seed,
+            device=device,
+        )
+        print(f"Emergence snapshot: {snapshot_dir}")
+        print(f"Dashboard: {snapshot_root / 'dashboard.html'}")
+    except Exception as exc:
+        print(f"\n[WARN] Emergence snapshot failed at step {step}: {exc}")
 
 
 def _viz_callback(

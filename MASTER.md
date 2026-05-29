@@ -687,3 +687,279 @@ Acceptance gates for the fresh cleaned Stage A:
 - Median variance ratio should be meaningfully lower than the contaminated checkpoint or at least stable without p99 blow-up.
 - Calibrated success should improve without losing latent diversity.
 - DDIM progression should still show stochastic path formation.
+
+## 2026-05-22 - Cleaned Stage A Result and Controlled B1 Branch
+
+Fresh cleaned pure reconstruction training completed:
+
+```powershell
+python.exe run_pure_recon.py --output-dir checkpoints\pure_recon_cleaned --steps 5000
+```
+
+Final checkpoint:
+
+```text
+checkpoints\pure_recon_cleaned\step_5000_final.pt
+```
+
+Training readout:
+
+```text
+train windows: 2,338,513
+val windows:     219,707
+test windows:    168,122
+model params: 11.3M
+final rec/nmse: 0.395 / 0.3954
+final x0s: 1.3384
+final grad norm: 0.58
+final coverage: 93.75%
+```
+
+Full 5000-sample evaluation:
+
+```powershell
+python.exe evaluate.py --checkpoint checkpoints\pure_recon_cleaned\step_5000_final.pt --num-paths 128 --max-samples 5000 --output checkpoints\pure_recon_cleaned\eval_cleaned_step_5000.json
+```
+
+Result:
+
+```text
+generator_success=100.00%
+cone_coverage=100.00%
+tight_cone_coverage=99.40%
+mean_scaled_closest_distance=7.6683
+calibrated_success_scaled_mse_lt_1=2.36%
+variance_ratio_mean/median=20.651 / 12.564
+scaled_distance_p50/p95/p99=4.812 / 23.155 / 40.345
+variance_ratio_p50/p95/p99=12.564 / 65.183 / 106.118
+direction_coverage=99.90%
+best_mse_direction_match=59.84%
+```
+
+Interpretation:
+
+- The cleaned-data restart removed the earlier flat-window p99 catastrophe.
+- The final 5000-step pure reconstruction checkpoint is not the best generator checkpoint.
+- It is stable and diverse, but too over-dispersed for the "128 futures should contain a close future" objective.
+- Final training loss alone is not a reliable checkpoint selector for this diffusion task.
+
+Checkpoint screen on cleaned Stage A:
+
+```text
+checkpoint    mean scaled dist    success <1x    var ratio med    direction match
+step_1000     2.2134              8.00%          4.616            63.67%
+step_2000     2.4074              7.33%          4.546            59.33%
+step_3000     2.4046              9.33%          4.694            58.67%
+step_4000     2.4753              8.00%          4.613            56.00%
+step_5000     7.6683              2.36%          12.564           59.84%
+```
+
+Decision:
+
+- Use `checkpoints\pure_recon_cleaned\step_1000.pt` as the best current Stage A base.
+- Do not use the final 5000-step checkpoint as the base for refinement.
+- Begin Phase B1 from step 1000 using tiny volatility/turning regularization only.
+
+Step-1000 emergence check:
+
+```powershell
+python.exe -m scripts.analysis.emergence_dashboard --checkpoint checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\pure_recon_cleaned\emergence_step_1000 --split val --num-contexts 8 --num-paths 128 --seed 1234
+python.exe -m scripts.analysis.visualize --checkpoint checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\pure_recon_cleaned\viz_step_1000 --num-samples 16 --num-paths 128 --data-index 0
+```
+
+Step-1000 realism readout:
+
+```text
+generated std: 0.000343
+real std:      0.000245
+generated kurtosis: 0.497 dashboard excess / 3.47 sample kurtosis
+real kurtosis:      3.909 dashboard excess / 7.95 sample kurtosis
+generated autocorr lag1: -0.0688
+real autocorr lag1:       0.0180 dashboard sample / -0.0443 broader sample
+```
+
+Interpretation:
+
+- Step 1000 is the strongest pure checkpoint so far for closest-path containment.
+- It remains too Gaussian and under-expresses volatility clustering/heavy tails.
+- It is good enough to justify a controlled B1 refinement, but not good enough as a finished generator.
+
+Executed cleaned Phase B1:
+
+```powershell
+python.exe run_phase_b1.py --resume checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\phase_b1_cleaned_from_1000 --steps 1500
+```
+
+Final checkpoint:
+
+```text
+checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt
+```
+
+B1 evaluation:
+
+```powershell
+python.exe evaluate.py --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --num-paths 128 --max-samples 1000 --output checkpoints\phase_b1_cleaned_from_1000\eval_step_1500_1000.json
+python.exe -m scripts.analysis.analyze_samples --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output checkpoints\phase_b1_cleaned_from_1000\sample_analysis_step_1500.json --num-paths 128 --num-samples 250
+```
+
+B1 result:
+
+```text
+generator_success=100.00%
+cone_coverage=100.00%
+tight_cone_coverage=86.90%
+mean_scaled_closest_distance=1.3813
+calibrated_success_scaled_mse_lt_1=35.30%
+variance_ratio_mean/median=3.033 / 2.093
+scaled_distance_p50/p95/p99=1.126 / 2.677 / 5.434
+variance_ratio_p50/p95/p99=2.093 / 7.382 / 16.894
+direction_coverage=100.00%
+best_mse_direction_match=62.60%
+```
+
+B1 sample realism:
+
+```text
+generated std: 0.0004
+real std:      0.0002
+KS stat:       0.1951
+variance ratio: 2.224
+generated lag1 autocorr: -0.0668
+real lag1 autocorr:      -0.0443
+generated 2nd diff: 0.000688
+real 2nd diff:      0.000368
+generated vol cluster lag1: 0.1484
+real vol cluster lag1:      0.2237
+generated kurtosis: 3.49
+real kurtosis:      7.95
+scaled best MSE:    25.9195
+```
+
+Interpretation:
+
+- B1 materially improved the containment/calibration objective.
+- Mean scaled closest distance improved from the screened Stage A range near `2.2-2.5` to `1.3813`.
+- Calibrated success below 1x improved from roughly `8-9%` to `35.30%`.
+- Median variance ratio improved from roughly `4.6x` to `2.093x`.
+- The model is still too Gaussian, still under-clusters volatility, and still produces paths that are rougher than real targets.
+- Phase B1 helped the core generator objective but did not solve financial realism.
+
+Current readiness assessment:
+
+- Data/pipeline readiness for research: high.
+- Pure diffusion emergence: validated enough to continue.
+- 128-path containment: partially validated, improved by B1, not finished.
+- Financial realism: not yet satisfactory.
+- Architecture scaling: still premature until B1 is validated on larger eval and visuals.
+
+Next required actions:
+
+1. Run full 5000-sample evaluation on `phase_b1_cleaned_from_1000`.
+2. Generate B1 dashboard and denoising visuals.
+3. Compare pure step 1000 vs B1 step 1500 visually and statistically.
+4. If full B1 eval holds, run a small B1 weight sweep before adding B2.
+5. Do not add autocorrelation, tail, diversity, or architecture changes until B1 is confirmed stable.
+
+Commands:
+
+```powershell
+python.exe evaluate.py --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --num-paths 128 --max-samples 5000 --output checkpoints\phase_b1_cleaned_from_1000\eval_step_1500_5000.json
+python.exe -m scripts.analysis.emergence_dashboard --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-dir checkpoints\phase_b1_cleaned_from_1000\emergence --split val --num-contexts 8 --num-paths 128 --seed 1234
+python.exe -m scripts.analysis.visualize --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-dir checkpoints\phase_b1_cleaned_from_1000\viz_step_1500 --num-samples 16 --num-paths 128 --data-index 0
+python.exe -m scripts.analysis.denoising_diagnostics --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-dir checkpoints\phase_b1_cleaned_from_1000\denoising_diag
+```
+
+## 2026-05-29 - Live Emergence Dashboard
+
+Goal:
+
+- Add observability for diffusion emergence without changing the core generator architecture.
+- Track 128 independent future paths for the same validation context across checkpoints.
+- Preserve stable path identity using fixed latent vectors and fixed initial DDIM noise.
+- Compare generated futures against the real historical future and expose denoising progression.
+
+Files edited:
+
+- `scripts/dashboard/__init__.py`
+  - Added dashboard package marker.
+- `scripts/dashboard/emergence_snapshots.py`
+  - Added snapshot emitter, fixed validation scenario suite, fixed-latent/fixed-noise 128-path sampling, per-path metrics, denoising state capture, and self-contained local HTML dashboard generation.
+- `trainer.py`
+  - Added opt-in emergence snapshot callback.
+  - Normal training remains unchanged unless `emergence_snapshot_every > 0`.
+  - Snapshots are emitted after checkpoint saves and final save.
+- `run_pure_recon.py`
+  - Added CLI flags for emergence snapshots.
+- `run_phase_b1.py`
+  - Added the same CLI flags for B1 runs.
+- `README.md`
+  - Added dashboard commands and artifact contract.
+
+Snapshot contract:
+
+```text
+scenario_suite.json
+step_XXXXXX/snapshot.npz
+  context:            (S, 128)
+  real_future:        (S, 20)
+  generated_futures:  (S, 128, 20)
+  latent_z:           (S, 128, 128)
+  denoising_states:   (S, snapshots, selected_paths, 20)
+step_XXXXXX/metrics.json
+dashboard.html
+```
+
+Dashboard features:
+
+- Main context/real/best/ensemble comparison.
+- 128 independent path tiles with stable path index.
+- Per-path detail view and metrics.
+- Best-of-K path highlighting.
+- Denoising progression for paths `0-3`.
+- Checkpoint-to-checkpoint training evolution cards.
+- Optional local auto-refresh with `dashboard.html?live=1`.
+
+Smoke checks executed:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile trainer.py run_pure_recon.py run_phase_b1.py scripts\dashboard\emergence_snapshots.py
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\emergence_smoke --split val --num-scenarios 2 --num-paths 128 --seed 1234
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\dashboard_hook_smoke --steps 1 --batch-size 2 --emergence-snapshot-every 1 --emergence-snapshot-dir visual_outputs\hook_smoke --emergence-num-scenarios 1 --emergence-num-paths 8 --emergence-seed 4321
+```
+
+Smoke output:
+
+```text
+visual_outputs\emergence_smoke\step_001500
+visual_outputs\emergence_smoke\dashboard.html
+visual_outputs\hook_smoke\step_000001
+visual_outputs\hook_smoke\dashboard.html
+```
+
+Verified smoke snapshot shapes:
+
+```text
+context:           (2, 128)
+real_future:       (2, 20)
+generated_futures: (2, 128, 20)
+latent_z:          (2, 128, 128)
+denoising_states:  (2, 7, 4, 20)
+```
+
+Primary commands:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\emergence_live --split val --num-scenarios 8 --num-paths 128 --seed 1234
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\pure_recon_live --steps 5000 --emergence-snapshot-every 1000 --emergence-snapshot-dir visual_outputs\pure_recon_live --emergence-num-scenarios 8 --emergence-num-paths 128 --emergence-seed 1234
+.\.venv\Scripts\python.exe run_phase_b1.py --resume checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\phase_b1_live --steps 1500 --emergence-snapshot-every 500 --emergence-snapshot-dir visual_outputs\phase_b1_live --emergence-num-scenarios 8 --emergence-num-paths 128 --emergence-seed 1234
+```
+
+Important constraint preserved:
+
+- No tokenizer work.
+- No Kalman/HMM layer.
+- No encoder redesign.
+- No diffusion objective change.
+- No new financial losses.
+- Dashboard is checkpoint-driven observability only.

@@ -27,6 +27,9 @@ checkpoints/**/*.safetensors
 
 # Visualizations
 **/viz/
+visual_outputs/
+emergence_snapshots/
+dashboard_cache/
 
 # Logs
 *.log

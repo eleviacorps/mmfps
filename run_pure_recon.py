@@ -15,6 +15,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=5000)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=5e-5)
+    parser.add_argument("--emergence-snapshot-every", type=int, default=0)
+    parser.add_argument("--emergence-snapshot-dir", default=None)
+    parser.add_argument("--emergence-num-scenarios", type=int, default=8)
+    parser.add_argument("--emergence-num-paths", type=int, default=128)
+    parser.add_argument("--emergence-seed", type=int, default=1234)
     return parser.parse_args()
 
 
@@ -43,4 +48,12 @@ def build_config(args: argparse.Namespace) -> BehaviorGenConfig:
 
 if __name__ == "__main__":
     args = parse_args()
-    train(output_dir=args.output_dir, config=build_config(args))
+    train(
+        output_dir=args.output_dir,
+        config=build_config(args),
+        emergence_snapshot_every=args.emergence_snapshot_every,
+        emergence_snapshot_dir=args.emergence_snapshot_dir,
+        emergence_num_scenarios=args.emergence_num_scenarios,
+        emergence_num_paths=args.emergence_num_paths,
+        emergence_seed=args.emergence_seed,
+    )
