@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -163,6 +164,14 @@ def train(
     emergence_num_scenarios: int = 8,
     emergence_num_paths: int = 128,
     emergence_seed: int = 1234,
+    live_emergence: bool = False,
+    live_emergence_dir: Optional[str] = None,
+    live_emergence_every_sec: float = 1.0,
+    live_emergence_every_steps: int = 0,
+    live_emergence_num_scenarios: int = 1,
+    live_emergence_num_paths: int = 128,
+    live_emergence_heavy_every: int = 10,
+    live_emergence_replay_stride: int = 1,
 ) -> BehaviorDiffusionGenerator:
     """Run full training pipeline.
 
@@ -237,6 +246,30 @@ def train(
     log_path = output_dir / "training_log.jsonl"
     buf = []
     snapshot_root = Path(emergence_snapshot_dir) if emergence_snapshot_dir else output_dir / "emergence_snapshots"
+    live_root = Path(live_emergence_dir) if live_emergence_dir else output_dir / "emergence_live"
+    live_emitter = None
+    live_last_emit = 0.0
+
+    if live_emergence:
+        try:
+            from scripts.dashboard.emergence_snapshots import LiveEmergenceEmitter
+
+            live_emitter = LiveEmergenceEmitter(
+                model=model,
+                val_ds=val_ds,
+                output_root=live_root,
+                split="val",
+                num_scenarios=live_emergence_num_scenarios,
+                num_paths=live_emergence_num_paths,
+                seed=emergence_seed,
+                device=device_t,
+                heavy_metrics_every=live_emergence_heavy_every,
+                replay_stride=live_emergence_replay_stride,
+            )
+            print(f"Live emergence dashboard: {live_root / 'dashboard.html'}?live=1")
+        except Exception as exc:
+            live_emitter = None
+            print(f"\n[WARN] Live emergence init failed: {exc}")
 
     def log_entry(data: dict) -> None:
         entry = {"timestamp": datetime.utcnow().isoformat(), **data}
@@ -427,6 +460,24 @@ def train(
             })
             log_entry({**step_metrics, "step": global_step, "epoch": 0})
 
+        if live_emitter is not None:
+            due_by_step = (
+                live_emergence_every_steps > 0
+                and global_step % live_emergence_every_steps == 0
+            )
+            now = time.monotonic()
+            due_by_time = (
+                live_emergence_every_steps <= 0
+                and now - live_last_emit >= max(0.1, live_emergence_every_sec)
+            )
+            if due_by_step or due_by_time:
+                live_last_emit = now
+                _live_emergence_callback(
+                    live_emitter=live_emitter,
+                    step=global_step,
+                    metrics=step_metrics,
+                )
+
         # ── Checkpoint ─────────────────────────────────────
         if global_step % cfg.checkpoint_every == 0:
             flush_log()
@@ -508,6 +559,18 @@ def _emergence_snapshot_callback(
         print(f"Dashboard: {snapshot_root / 'dashboard.html'}")
     except Exception as exc:
         print(f"\n[WARN] Emergence snapshot failed at step {step}: {exc}")
+
+
+def _live_emergence_callback(
+    live_emitter,
+    step: int,
+    metrics: dict[str, float],
+) -> None:
+    """Best-effort low-latency live dashboard update."""
+    try:
+        live_emitter.emit(step=step, metrics=metrics)
+    except Exception as exc:
+        print(f"\n[WARN] Live emergence update failed at step {step}: {exc}")
 
 
 def _viz_callback(

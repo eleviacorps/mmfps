@@ -150,6 +150,55 @@ def _summary_metrics(paths: np.ndarray, target: np.ndarray) -> dict[str, float |
     }
 
 
+def _fast_path_metrics(paths: np.ndarray, target: np.ndarray) -> list[dict[str, float]]:
+    target = np.asarray(target, dtype=np.float64)
+    target_total = float(np.sum(target))
+    target_vol = float(np.std(target) + 1e-12)
+    rows = []
+    for idx, path in enumerate(np.asarray(paths, dtype=np.float64)):
+        mse = float(np.mean((path - target) ** 2))
+        rows.append({
+            "path_index": int(idx),
+            "mse": _json_float(mse),
+            "rmse": _json_float(math.sqrt(max(mse, 0.0))),
+            "mae": _json_float(np.mean(np.abs(path - target))),
+            "corr": _safe_corr(path, target),
+            "direction_match": _sign_match(path, target),
+            "magnitude_error": _json_float(abs(float(path.sum()) - target_total)),
+            "volatility_ratio": _json_float(float(np.std(path) + 1e-12) / target_vol),
+            "turning_error": 0.0,
+        })
+    return rows
+
+
+def _fast_summary_metrics(paths: np.ndarray, target: np.ndarray) -> dict[str, float | int]:
+    per_path = _fast_path_metrics(paths, target)
+    mses = np.array([row["mse"] for row in per_path], dtype=np.float64)
+    best_idx = int(mses.argmin())
+    target_std = float(np.std(target) + 1e-12)
+    return {
+        "best_path_index": best_idx,
+        "best_path_mse": _json_float(mses[best_idx]),
+        "median_path_mse": _json_float(np.median(mses)),
+        "mean_path_mse": _json_float(mses.mean()),
+        "path_spread_mean_step_std": _json_float(np.std(paths, axis=0).mean()),
+        "endpoint_spread": _json_float(np.std(np.cumsum(paths, axis=-1)[:, -1])),
+        "median_variance_ratio": _json_float(np.median(np.var(paths, axis=-1) / (target_std**2))),
+        "mean_abs_path_corr": None,
+        "direction_coverage": _json_float(float(np.mean([row["direction_match"] for row in per_path]))),
+        "generated_std": _json_float(np.std(paths)),
+        "real_std": _json_float(np.std(target)),
+        "generated_kurtosis": None,
+        "real_kurtosis": None,
+        "generated_autocorr_lag1": None,
+        "real_autocorr_lag1": None,
+        "generated_vol_cluster_lag1": None,
+        "real_vol_cluster_lag1": None,
+        "generated_turning_frequency": None,
+        "real_turning_frequency": None,
+    }
+
+
 def _sample_score(sample: Sample) -> dict[str, float]:
     context_proxy = sample.long_seq[:, 0].numpy().astype(np.float64)
     target = sample.target.numpy().astype(np.float64)
@@ -365,6 +414,160 @@ def _step_from_checkpoint(checkpoint: Path, fallback: int = 0) -> int:
     return int(match.group(1)) if match else fallback
 
 
+class LiveEmergenceEmitter:
+    """Fast in-loop emitter for chart-like dashboard updates.
+
+    The fixed scenario samples are materialized once. Each call regenerates the
+    same latent/noise identities from the current model weights and atomically
+    replaces `live_latest.js`.
+    """
+
+    def __init__(
+        self,
+        model: BehaviorDiffusionGenerator,
+        val_ds: PathDataset,
+        output_root: Path,
+        split: str = "val",
+        num_scenarios: int = 1,
+        num_paths: int = 128,
+        seed: int = 1234,
+        scenario_scan: int = 512,
+        device: torch.device | None = None,
+        heavy_metrics_every: int = 10,
+        replay_stride: int = 1,
+    ):
+        self.model = model
+        self.output_root = output_root
+        self.split = split
+        self.num_scenarios = num_scenarios
+        self.num_paths = num_paths
+        self.seed = seed
+        self.device = device or next(model.parameters()).device
+        self.heavy_metrics_every = max(1, heavy_metrics_every)
+        self.replay_stride = max(0, replay_stride)
+        self.emit_count = 0
+        self.val_ds = val_ds
+        self.output_root.mkdir(parents=True, exist_ok=True)
+        self.scenarios = load_or_create_scenario_suite(
+            output_root=output_root,
+            config=model.config,
+            split=split,
+            num_scenarios=num_scenarios,
+            seed=seed,
+            scan=scenario_scan,
+        )[:num_scenarios]
+        self.base_dataset_indices = [int(s["dataset_index"]) for s in self.scenarios]
+        self.samples = [val_ds[idx] for idx in self.base_dataset_indices]
+        rebuild_dashboard(output_root)
+
+    @torch.no_grad()
+    def emit(self, step: int, metrics: dict[str, float] | None = None) -> Path:
+        was_training = self.model.training
+        self.model.eval()
+        self.model.scheduler.noise_scale_val = 1.0
+        self.emit_count += 1
+        include_heavy = self.emit_count % self.heavy_metrics_every == 0
+
+        contexts = []
+        targets = []
+        paths_all = []
+        denoise_all = []
+        per_scenario_metrics = []
+        per_path_metrics = []
+        denoise_timesteps: list[int] | None = None
+        selected_denoise_paths: list[int] | None = None
+
+        for scenario_idx, scenario in enumerate(self.scenarios):
+            if self.replay_stride > 0:
+                dataset_index = (
+                    self.base_dataset_indices[scenario_idx]
+                    + step * self.replay_stride
+                ) % len(self.val_ds)
+                sample = self.val_ds[int(dataset_index)]
+            else:
+                dataset_index = self.base_dataset_indices[scenario_idx]
+                sample = self.samples[scenario_idx]
+            short = sample.short_seq.unsqueeze(0).to(self.device)
+            mid = sample.mid_seq.unsqueeze(0).to(self.device)
+            long = sample.long_seq.unsqueeze(0).to(self.device)
+            target = sample.target.numpy() / self.model.config.target_scale
+            paths, _, _, denoise, timesteps, selected = generate_fixed_paths(
+                model=self.model,
+                short=short,
+                mid=mid,
+                long=long,
+                num_paths=self.num_paths,
+                latent_seed=self.seed + scenario_idx * 1000 + 17,
+                noise_seed=self.seed + scenario_idx * 1000 + 29,
+                num_denoise_snapshots=4,
+            )
+            paths = paths[0]
+            contexts.append(sample.long_seq[:, 0].numpy().astype(np.float32))
+            targets.append(target.astype(np.float32))
+            paths_all.append(paths.astype(np.float32))
+            denoise_all.append(denoise.astype(np.float32))
+
+            if include_heavy:
+                scenario_metrics = _summary_metrics(paths, target)
+                path_rows = _path_metrics(paths, target)
+            else:
+                scenario_metrics = _fast_summary_metrics(paths, target)
+                path_rows = _fast_path_metrics(paths, target)
+            scenario_metrics.update({
+                "scenario_index": scenario_idx,
+                "scenario_id": scenario["scenario_id"],
+                "dataset_index": int(scenario["dataset_index"]),
+                "replay_dataset_index": int(dataset_index),
+                "sample_idx": int(sample.sample_idx),
+                "heavy_metrics": bool(include_heavy),
+            })
+            per_scenario_metrics.append(scenario_metrics)
+            for row in path_rows:
+                row.update({
+                    "scenario_index": scenario_idx,
+                    "scenario_id": scenario["scenario_id"],
+                })
+            per_path_metrics.append(path_rows)
+            denoise_timesteps = timesteps
+            selected_denoise_paths = selected
+
+        live_payload = {
+            "version": SNAPSHOT_VERSION,
+            "live": True,
+            "stream_version": int(datetime.now(timezone.utc).timestamp() * 1000),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "snapshot": {
+                "dir": "live",
+                "live": True,
+                "step": int(step),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "checkpoint_path": None,
+                "scenarios": self.scenarios,
+                "scenario_metrics": per_scenario_metrics,
+                "path_metrics": per_path_metrics,
+                "denoise_timesteps": denoise_timesteps or [],
+                "selected_denoise_paths": selected_denoise_paths or [],
+                "train_metrics": metrics or {},
+            },
+            "arrays": {
+                "context": np.stack(contexts).round(8).tolist(),
+                "real_future": np.stack(targets).round(8).tolist(),
+                "generated_futures": np.stack(paths_all).round(8).tolist(),
+                "denoising_states": np.stack(denoise_all).round(8).tolist(),
+            },
+        }
+        tmp = self.output_root / "live_latest.tmp.js"
+        out = self.output_root / "live_latest.js"
+        tmp.write_text(
+            "window.MMFPS_LIVE_PAYLOAD = " + json.dumps(live_payload) + ";\n",
+            encoding="utf-8",
+        )
+        tmp.replace(out)
+        if was_training:
+            self.model.train()
+        return out
+
+
 @torch.no_grad()
 def emit_emergence_snapshot(
     model: BehaviorDiffusionGenerator,
@@ -524,6 +727,30 @@ def rebuild_dashboard(snapshot_root: Path, output_html: Path | None = None) -> P
             "selected_denoise_paths": meta.get("selected_denoise_paths", []),
         })
 
+    if not snapshots:
+        scenarios = []
+        suite_path = snapshot_root / "scenario_suite.json"
+        if suite_path.exists():
+            with open(suite_path, "r", encoding="utf-8") as f:
+                scenarios = json.load(f).get("scenarios", [])
+        snapshots.append({
+            "dir": "empty",
+            "step": 0,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "checkpoint_path": None,
+            "scenarios": scenarios,
+            "scenario_metrics": [],
+            "path_metrics": [],
+            "denoise_timesteps": [],
+            "selected_denoise_paths": [],
+        })
+        arrays["empty"] = {
+            "context": [],
+            "real_future": [],
+            "generated_futures": [],
+            "denoising_states": [],
+        }
+
     html = _dashboard_html({
         "snapshots": snapshots,
         "arrays": arrays,
@@ -592,9 +819,10 @@ def _dashboard_html(payload: dict) -> str:
       <label>Checkpoint<select id="checkpointSelect"></select></label>
       <label>Scenario<select id="scenarioSelect"></select></label>
       <label>Path<select id="pathSelect"></select></label>
-      <label><span>Show all paths</span><input id="showAll" type="checkbox" checked></label>
+      <label><span>Show all paths</span><input id="showAll" type="checkbox"></label>
       <button id="prevStep">Prev checkpoint</button>
       <button id="nextStep">Next checkpoint</button>
+      <div class="small" id="liveStatus">mode: checkpoint replay</div>
     </div>
   </header>
   <main>
@@ -626,8 +854,9 @@ def _dashboard_html(payload: dict) -> str:
     </section>
   </main>
   <script>
-    const DATA = {payload_json};
+    let DATA = {payload_json};
     const state = {{ checkpoint: 0, scenario: 0, path: 0 }};
+    let liveVersion = null;
     const colors = {{ blue: '#58a6ff', green: '#44d17b', red: '#ff6b6b', yellow: '#f2c94c', muted: '#93a3ad' }};
 
     function byId(id) {{ return document.getElementById(id); }}
@@ -692,15 +921,16 @@ def _dashboard_html(payload: dict) -> str:
       const sm = snap.scenario_metrics[state.scenario];
       const best = paths[sm.best_path_index];
       const showAll = byId('showAll').checked;
-      const all = showAll ? paths.concat([real, best]) : [real, best, paths[state.path]];
+      const selected = paths[state.path];
+      const all = showAll ? paths.concat([real, best, selected]) : [real, best, selected];
       const range = seriesRange(all);
       const ctxW = w * 0.36;
       const futW = w * 0.60;
       const gap = w * 0.04;
       const contextNorm = normalize(context, range);
       drawLine(ctx, contextNorm, range, w, h, colors.muted, 0.75, 1.0, 0, ctxW);
-      if (showAll) for (const p of paths) drawLine(ctx, p, range, w, h, colors.blue, 0.09, 0.7, ctxW + gap, futW);
-      drawLine(ctx, paths[state.path], range, w, h, colors.yellow, 0.95, 1.7, ctxW + gap, futW);
+      if (showAll) for (const p of paths) drawLine(ctx, p, range, w, h, colors.blue, 0.055, 0.55, ctxW + gap, futW);
+      if (state.path !== sm.best_path_index) drawLine(ctx, selected, range, w, h, colors.yellow, 0.95, 1.7, ctxW + gap, futW);
       drawLine(ctx, best, range, w, h, colors.green, 1, 2.2, ctxW + gap, futW);
       drawLine(ctx, real, range, w, h, colors.red, 1, 2.3, ctxW + gap, futW);
       ctx.strokeStyle = '#2b3840';
@@ -710,6 +940,10 @@ def _dashboard_html(payload: dict) -> str:
       ctx.fillStyle = colors.red; ctx.fillText('real future', ctxW + gap + 8, 18);
       ctx.fillStyle = colors.green; ctx.fillText('best generated', ctxW + gap + 96, 18);
       ctx.fillStyle = colors.yellow; ctx.fillText('selected path', ctxW + gap + 220, 18);
+      if (snap.live || snap.scenario_metrics[state.scenario]?.replay_dataset_index !== undefined) {{
+        ctx.fillStyle = colors.muted;
+        ctx.fillText('rolling replay', 10, h - 12);
+      }}
     }}
     function normalize(context, targetRange) {{
       const [tMin, tMax] = targetRange;
@@ -819,7 +1053,7 @@ def _dashboard_html(payload: dict) -> str:
       byId('nextStep').onclick = () => {{ state.checkpoint = Math.min(DATA.snapshots.length - 1, state.checkpoint + 1); syncSelectors(); renderAll(); }};
     }}
     function renderAll(redrawTiles=true) {{
-      if (!DATA.snapshots.length) return;
+      if (!DATA.snapshots.length || !current().arr.generated_futures.length) return;
       syncSelectors();
       renderMetrics();
       drawMain();
@@ -828,12 +1062,55 @@ def _dashboard_html(payload: dict) -> str:
       if (redrawTiles) renderTiles();
       renderHistory();
     }}
+    function installLivePolling() {{
+      const params = new URLSearchParams(window.location.search);
+      const live = params.get('live') === '1' || params.get('mode') === 'live';
+      if (!live) return;
+      byId('liveStatus').textContent = 'mode: live stream, waiting for data';
+      const pollMs = Math.max(250, Number(params.get('poll') || 1000));
+      let slowRenderCounter = 0;
+      const loadLive = () => {{
+        const old = document.getElementById('livePayloadScript');
+        if (old) old.remove();
+        const script = document.createElement('script');
+        script.id = 'livePayloadScript';
+        script.src = 'live_latest.js?t=' + Date.now();
+        script.onload = () => {{
+          const payload = window.MMFPS_LIVE_PAYLOAD;
+          if (!payload || payload.stream_version === liveVersion) return;
+          liveVersion = payload.stream_version;
+          DATA = {{
+            snapshots: [payload.snapshot],
+            arrays: {{ live: payload.arrays }},
+          }};
+          state.checkpoint = 0;
+          byId('checkpointSelect').innerHTML = '<option value="0">live step ' + payload.snapshot.step + '</option>';
+          const sm = payload.snapshot.scenario_metrics[state.scenario] || payload.snapshot.scenario_metrics[0];
+          byId('liveStatus').textContent = 'mode: live stream | step ' + payload.snapshot.step + ' | replay idx ' + (sm.replay_dataset_index ?? sm.dataset_index);
+          syncSelectors();
+          renderMetrics();
+          drawMain();
+          drawDetail();
+          slowRenderCounter += 1;
+          const doSlow = slowRenderCounter % 5 === 0 || sm.heavy_metrics === true;
+          if (doSlow) {{
+            renderTiles();
+            drawDenoise();
+            renderHistory();
+          }}
+        }};
+        script.onerror = () => {{
+          byId('liveStatus').textContent = 'mode: live, no live_latest.js yet';
+        }};
+        document.body.appendChild(script);
+      }};
+      loadLive();
+      setInterval(loadLive, pollMs);
+    }}
     window.addEventListener('resize', () => renderAll(false));
     setupSelectors();
     renderAll();
-    if (new URLSearchParams(window.location.search).get('live') === '1') {{
-      setTimeout(() => window.location.reload(), 15000);
-    }}
+    installLivePolling();
   </script>
 </body>
 </html>
@@ -866,6 +1143,34 @@ def emit_from_checkpoint(
     )
 
 
+def emit_live_from_checkpoint(
+    checkpoint: Path,
+    output_root: Path,
+    split: str,
+    num_scenarios: int,
+    num_paths: int,
+    seed: int,
+    device_name: str | None,
+    replay_stride: int,
+) -> Path:
+    device = torch.device(device_name or ("cuda" if torch.cuda.is_available() else "cpu"))
+    model = _load_model_from_checkpoint(checkpoint, device)
+    ds = PathDataset(model.config, split=split)
+    emitter = LiveEmergenceEmitter(
+        model=model,
+        val_ds=ds,
+        output_root=output_root,
+        split=split,
+        num_scenarios=num_scenarios,
+        num_paths=num_paths,
+        seed=seed,
+        device=device,
+        replay_stride=replay_stride,
+    )
+    emitter.emit(step=_step_from_checkpoint(checkpoint))
+    return output_root / "live_latest.js"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Emit fixed-latent emergence snapshots and dashboard.")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -883,6 +1188,16 @@ def main() -> None:
     build.add_argument("--snapshot-root", type=Path, default=Path("emergence_snapshots"))
     build.add_argument("--output-html", type=Path, default=None)
 
+    live = sub.add_parser("emit-live", help="Generate live_latest.js from one checkpoint for smoke testing.")
+    live.add_argument("--checkpoint", type=Path, required=True)
+    live.add_argument("--output-root", type=Path, default=Path("emergence_live"))
+    live.add_argument("--split", choices=["train", "val", "test"], default="val")
+    live.add_argument("--num-scenarios", type=int, default=1)
+    live.add_argument("--num-paths", type=int, default=128)
+    live.add_argument("--seed", type=int, default=1234)
+    live.add_argument("--device", default=None)
+    live.add_argument("--replay-stride", type=int, default=1)
+
     args = parser.parse_args()
     if args.cmd == "emit":
         snap = emit_from_checkpoint(
@@ -899,6 +1214,19 @@ def main() -> None:
     elif args.cmd == "build-dashboard":
         html = rebuild_dashboard(args.snapshot_root, args.output_html)
         print(f"Dashboard: {html}")
+    elif args.cmd == "emit-live":
+        live_path = emit_live_from_checkpoint(
+            checkpoint=args.checkpoint,
+            output_root=args.output_root,
+            split=args.split,
+            num_scenarios=args.num_scenarios,
+            num_paths=args.num_paths,
+            seed=args.seed,
+            device_name=args.device,
+            replay_stride=args.replay_stride,
+        )
+        print(f"Live stream file: {live_path}")
+        print(f"Dashboard: {args.output_root / 'dashboard.html'}?live=1")
 
 
 if __name__ == "__main__":

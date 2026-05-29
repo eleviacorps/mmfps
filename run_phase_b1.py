@@ -32,6 +32,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--emergence-num-scenarios", type=int, default=8)
     parser.add_argument("--emergence-num-paths", type=int, default=128)
     parser.add_argument("--emergence-seed", type=int, default=1234)
+    parser.add_argument("--live-emergence", action="store_true")
+    parser.add_argument("--live-emergence-dir", default=None)
+    parser.add_argument("--live-emergence-every-sec", type=float, default=1.0)
+    parser.add_argument("--live-emergence-every-steps", type=int, default=0)
+    parser.add_argument("--live-emergence-num-scenarios", type=int, default=1)
+    parser.add_argument("--live-emergence-num-paths", type=int, default=128)
+    parser.add_argument("--live-emergence-heavy-every", type=int, default=10)
+    parser.add_argument("--live-emergence-replay-stride", type=int, default=1)
     parser.add_argument(
         "--full-resume",
         action="store_true",
@@ -76,4 +84,12 @@ if __name__ == "__main__":
         emergence_num_scenarios=args.emergence_num_scenarios,
         emergence_num_paths=args.emergence_num_paths,
         emergence_seed=args.emergence_seed,
+        live_emergence=args.live_emergence,
+        live_emergence_dir=args.live_emergence_dir,
+        live_emergence_every_sec=args.live_emergence_every_sec,
+        live_emergence_every_steps=args.live_emergence_every_steps,
+        live_emergence_num_scenarios=args.live_emergence_num_scenarios,
+        live_emergence_num_paths=args.live_emergence_num_paths,
+        live_emergence_heavy_every=args.live_emergence_heavy_every,
+        live_emergence_replay_stride=args.live_emergence_replay_stride,
     )

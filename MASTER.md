@@ -962,4 +962,155 @@ Important constraint preserved:
 - No encoder redesign.
 - No diffusion objective change.
 - No new financial losses.
-- Dashboard is checkpoint-driven observability only.
+- Dashboard is observability only.
+
+## 2026-05-29 - True Live Emergence Stream
+
+User correction:
+
+- The previous dashboard was checkpoint-driven.
+- Requirement is a live trading-chart style dashboard that updates during training without waiting for checkpoint saves.
+
+Implementation:
+
+- Added `LiveEmergenceEmitter` in `scripts/dashboard/emergence_snapshots.py`.
+- The emitter caches the fixed validation scenarios in memory once.
+- Each live update regenerates the same fixed 128 latent/noise branches from the current in-memory model state.
+- Writes an atomic `live_latest.js` stream file.
+- Dashboard polls `live_latest.js` every `poll` milliseconds and redraws in place.
+- Existing checkpoint snapshot/replay mode remains available as fallback.
+
+Live artifact contract:
+
+```text
+visual_outputs/<run>/
+  dashboard.html
+  scenario_suite.json
+  live_latest.js
+```
+
+Live stream contents:
+
+```text
+snapshot.step
+snapshot.scenarios
+snapshot.scenario_metrics
+snapshot.path_metrics
+snapshot.train_metrics
+arrays.context
+arrays.real_future
+arrays.generated_futures
+arrays.denoising_states
+```
+
+Fast vs heavy split:
+
+- Fast live updates default to 1 scenario x 128 paths.
+- Heavy metrics are computed only every `--live-emergence-heavy-every` emissions.
+- Checkpoint snapshots still provide heavier replay artifacts under `step_XXXXXX/`.
+
+Trainer changes:
+
+- `trainer.py`
+  - Added opt-in live streaming args to `train()`.
+  - Live updates are time-gated with `live_emergence_every_sec` or step-gated with `live_emergence_every_steps`.
+  - Live updates do not depend on checkpoint saves.
+  - Training still runs normally when live mode is disabled.
+- `run_pure_recon.py`
+  - Added live dashboard CLI flags.
+- `run_phase_b1.py`
+  - Added live dashboard CLI flags.
+- `README.md`
+  - Added live-stream commands.
+
+Smoke checks executed:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile trainer.py run_pure_recon.py run_phase_b1.py scripts\dashboard\emergence_snapshots.py
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit-live --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\live_smoke --split val --num-scenarios 1 --num-paths 128 --seed 1234
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\live_hook_smoke --steps 4 --batch-size 2 --live-emergence --live-emergence-dir visual_outputs\live_hook_smoke --live-emergence-every-steps 2 --live-emergence-num-scenarios 1 --live-emergence-num-paths 16 --live-emergence-heavy-every 2
+```
+
+Smoke output:
+
+```text
+visual_outputs\live_smoke\dashboard.html?live=1
+visual_outputs\live_smoke\live_latest.js
+visual_outputs\live_hook_smoke\dashboard.html?live=1
+visual_outputs\live_hook_smoke\live_latest.js
+```
+
+Primary live training command:
+
+```powershell
+.\.venv\Scripts\python.exe run_phase_b1.py --resume checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\phase_b1_live --steps 1500 --live-emergence --live-emergence-dir visual_outputs\phase_b1_live --live-emergence-every-sec 1.0 --live-emergence-num-scenarios 1 --live-emergence-num-paths 128 --live-emergence-heavy-every 10 --live-emergence-replay-stride 1
+```
+
+Open:
+
+```text
+visual_outputs\phase_b1_live\dashboard.html?live=1&poll=1000
+```
+
+Latency note:
+
+- The browser can poll below one second, for example `poll=250`.
+- Actual update rate is bounded by how long 128-path DDIM generation takes on the current machine.
+- For sub-second updates, keep live mode to 1 scenario and avoid heavy metrics on every emission.
+
+## 2026-05-29 - Live Dashboard UX Rework
+
+Problem:
+
+- The dashboard still felt like a periodically refreshed report instead of a live trading chart.
+- Main chart was too crowded when all 128 paths were shown.
+- The visual context did not feel like an advancing market tape.
+- Needed to confirm live visualization does not narrow training data usage.
+
+Changes:
+
+- `scripts/dashboard/emergence_snapshots.py`
+  - Main chart now defaults to `show all paths = off`.
+  - Main chart draws context, real future, best generated path, and selected path only.
+  - 128-path ensemble remains available in the side tile grid and optional `show all paths` toggle.
+  - Live polling updates canvases/metrics in place using `live_latest.js`; there is no hard page reload loop.
+  - Live mode redraws fast layers every payload and refreshes secondary layers less frequently.
+  - Added rolling replay support via `replay_stride`.
+- `trainer.py`
+  - Added `live_emergence_replay_stride`.
+  - Training loop remains full-corpus: `DataLoader(train_ds, shuffle=True, drop_last=True)` over the full train split.
+  - Live samples are read only from validation data for visualization.
+- `run_pure_recon.py` and `run_phase_b1.py`
+  - Added `--live-emergence-replay-stride`.
+- `README.md`
+  - Documented in-place live redraw, rolling replay, and full-dataset training behavior.
+
+Smoke checks:
+
+```powershell
+.\.venv\Scripts\python.exe -m py_compile trainer.py run_pure_recon.py run_phase_b1.py scripts\dashboard\emergence_snapshots.py
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit-live --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\live_ux_smoke --split val --num-scenarios 1 --num-paths 128 --seed 1234 --replay-stride 1
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\live_ux_hook_smoke --steps 5 --batch-size 2 --live-emergence --live-emergence-dir visual_outputs\live_ux_hook_smoke --live-emergence-every-steps 2 --live-emergence-num-scenarios 1 --live-emergence-num-paths 16 --live-emergence-heavy-every 2 --live-emergence-replay-stride 1
+```
+
+Verified:
+
+```text
+visual_outputs\live_ux_smoke\dashboard.html?live=1
+visual_outputs\live_ux_smoke\live_latest.js
+visual_outputs\live_ux_hook_smoke\dashboard.html?live=1
+visual_outputs\live_ux_hook_smoke\live_latest.js
+live payload includes replay_dataset_index
+dashboard default checkbox for all paths is unchecked
+```
+
+Full dataset training verification:
+
+```text
+Train: 2,338,513
+Val:   219,707
+Test:  168,122
+Batches/epoch with batch_size=2 smoke: 1,169,256
+```
+
+The live dashboard does not change training sampling. It only reads fixed or rolling validation windows for observability.

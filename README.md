@@ -195,6 +195,51 @@ Visualize generated paths:
 
 ## Live Emergence Dashboard
 
+Start a true live dashboard stream from an existing checkpoint for smoke testing:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.dashboard.emergence_snapshots emit-live --checkpoint checkpoints\phase_b1_cleaned_from_1000\step_1500_final.pt --output-root visual_outputs\live_smoke --split val --num-scenarios 1 --num-paths 128 --seed 1234
+```
+
+Open:
+
+```text
+visual_outputs\live_smoke\dashboard.html?live=1&poll=1000
+```
+
+`live_latest.js` is the fast live stream file. The dashboard polls it and redraws canvases/metrics in place without a full page reload. Use `poll=250`, `poll=500`, or `poll=1000` to control browser polling in milliseconds.
+
+Enable live updates during pure reconstruction training:
+
+```powershell
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\pure_recon_live --steps 5000 --live-emergence --live-emergence-dir visual_outputs\pure_recon_live --live-emergence-every-sec 1.0 --live-emergence-num-scenarios 1 --live-emergence-num-paths 128 --live-emergence-heavy-every 10 --live-emergence-replay-stride 1
+```
+
+Enable live updates during Phase B1:
+
+```powershell
+.\.venv\Scripts\python.exe run_phase_b1.py --resume checkpoints\pure_recon_cleaned\step_1000.pt --output-dir checkpoints\phase_b1_live --steps 1500 --live-emergence --live-emergence-dir visual_outputs\phase_b1_live --live-emergence-every-sec 1.0 --live-emergence-num-scenarios 1 --live-emergence-num-paths 128 --live-emergence-heavy-every 10 --live-emergence-replay-stride 1
+```
+
+Open while training:
+
+```text
+visual_outputs\phase_b1_live\dashboard.html?live=1&poll=1000
+```
+
+For a stricter step-based stream instead of a wall-clock stream:
+
+```powershell
+.\.venv\Scripts\python.exe run_pure_recon.py --output-dir checkpoints\pure_recon_live --steps 5000 --live-emergence --live-emergence-dir visual_outputs\pure_recon_live --live-emergence-every-steps 5 --live-emergence-num-scenarios 1 --live-emergence-num-paths 128
+```
+
+Live mode is intentionally split from heavy checkpoint mode:
+
+- Fast live stream: `live_latest.js`, normally 1 scenario x 128 paths, updated every ~1 second if generation cost allows.
+- Heavy replay snapshots: `step_XXXXXX\snapshot.npz` and `metrics.json`, emitted at checkpoint intervals when enabled.
+- Rolling market replay: `--live-emergence-replay-stride 1` advances the displayed validation context by one dataset window per live emission. Use `0` for fixed validation scenarios.
+- Training still uses the full training split through the normal `DataLoader`; live scenarios are visualization-only.
+
 Emit a fixed-latent 128-path snapshot from an existing checkpoint:
 
 ```powershell
@@ -207,10 +252,10 @@ Open:
 visual_outputs\emergence_live\dashboard.html
 ```
 
-For auto-refresh while training emits new snapshots, open:
+For checkpoint fallback replay, open:
 
 ```text
-visual_outputs\emergence_live\dashboard.html?live=1
+visual_outputs\emergence_live\dashboard.html
 ```
 
 Enable checkpoint-driven dashboard snapshots during pure reconstruction training:
